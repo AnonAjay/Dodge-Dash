@@ -1,0 +1,11 @@
+{
+  "station": "A",
+  "server_url": "http://192.168.1.10:8000",
+  "camera_index": 0,
+  "camera_width": 640,
+  "camera_height": 480,
+  "model_path": "models/pose_landmarker_lite.task",
+  "grid": { "cols": 3, "rows": 3, "tile_m": 0.6 },
+  "footprint_radius_m": 0.25,
+  "round_seconds": 75
+}
