@@ -36,11 +36,11 @@ import numpy as np
 S = 600                # map panel size (pixels)
 SIDE_W = 290           # sidebar width
 PAD = 40               # border around the floor on the map
-WARN_S = 0.05           # warning time before a box lands (bigger = slower)
-IMPACT_S = 0.1        # how long the red "landed" square is shown
-SPAWN_EVERY_S = 0.1     # seconds between new boxes (bigger = calmer)
+WARN_S = 0.5           # warning time before a box lands (bigger = slower)
+IMPACT_S = 0.2        # how long the red "landed" square is shown
+SPAWN_EVERY_S = 0.45     # seconds between new boxes (bigger = calmer)
 BOX_FRACTION = 0.32     # danger square = this fraction of the floor size (49 in box -> ~0.4 m)
-CHASE_PROB = 0.8       # chance a box aims at the player's current position
+CHASE_PROB = 0.5       # chance a box aims at the player's current position
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 ORANGE, RED, GREEN, CYAN, WHITE, GREY = (0, 165, 255), (0, 0, 230), (0, 220, 0), (255, 200, 0), (255, 255, 255), (170, 170, 170)
