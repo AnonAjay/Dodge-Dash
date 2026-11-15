@@ -1,26 +1,24 @@
-"""Download the MediaPipe pose model into models/ (not committed to git).
-    python -m tools.get_models            # lite (fast)
-    python -m tools.get_models --variant full
-If the download fails, get the .task file from the MediaPipe pose landmarker docs
-and save it as models/pose_landmarker_<variant>.task
+"""Download the MediaPipe pose model once (needs internet).
+
+Run from the repo root:  python -m tools.get_models
+The .task file is git-ignored: every laptop needs its own copy (or copy it by USB for the fest).
 """
-import argparse
 import urllib.request
 from pathlib import Path
 
-BASE = "https://storage.googleapis.com/mediapipe-models/pose_landmarker"
+URL = ("https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
+       "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task")
+DEST = Path("models/pose_landmarker_lite.task")
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--variant", choices=["lite", "full", "heavy"], default="lite")
-    args = ap.parse_args()
-    url = f"{BASE}/pose_landmarker_{args.variant}/float16/latest/pose_landmarker_{args.variant}.task"
-    dest = Path("models") / f"pose_landmarker_{args.variant}.task"
-    dest.parent.mkdir(exist_ok=True)
-    print(f"Downloading {url}")
-    urllib.request.urlretrieve(url, dest)
-    print(f"Saved {dest} ({dest.stat().st_size / 1e6:.1f} MB)")
+def main():
+    DEST.parent.mkdir(exist_ok=True)
+    if DEST.exists():
+        print("Already downloaded:", DEST)
+        return
+    print("Downloading...")
+    urllib.request.urlretrieve(URL, DEST)
+    print("Saved to", DEST)
 
 
 if __name__ == "__main__":
