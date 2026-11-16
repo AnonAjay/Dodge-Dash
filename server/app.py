@@ -12,14 +12,18 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 DATA = Path("data")
 SCORES_FILE = DATA / "scores.jsonl"
 PLAYERS_FILE = DATA / "players.json"
 PHOTOS_DIR = DATA / "photos"
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(title="Dodge & Drip server")
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 _lock = threading.Lock()
 _seen_event_ids: set[str] = set()
@@ -273,265 +277,399 @@ def big_screen_display() -> str:
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dodge &amp; Drip // Live Arena Leaderboard</title>
+<title>Dodge &amp; Drip - Leaderboard</title>
 <style>
   :root {
-    --bg-dark: #07090e;
-    --card-bg: #0f1523;
-    --card-border: #1e293b;
-    --accent-cyan: #00f2fe;
-    --accent-purple: #9d4edd;
-    --accent-pink: #ff007f;
-    --accent-green: #10b981;
-    --text-primary: #f8fafc;
-    --text-muted: #94a3b8;
-    --gold: #facc15;
-    --silver: #e2e8f0;
-    --bronze: #f97316;
+    --twilight-dark: #35235d;
+    --twilight-purple: #48327a;
+    --twilight-lilac: #9b74b8;
+    --sunset-pink: #ea7d8b;
+    --sunset-peach: #fca289;
+    --sunset-gold: #ffd152;
+    --retro-green: #58c038;
+    --neon-cyan: #00f0ff;
+    --font-pixel: "Consolas", "Courier New", monospace;
+    --font-retro: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
   }
-  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    background-color: var(--bg-dark);
-    color: var(--text-primary);
+    min-height: 100vh;
     height: 100vh;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     user-select: none;
+    color: #f8fafc;
+    font-family: var(--font-retro);
+    background-color: #2c1b4e;
+    background-image:
+      url('/static/bg-sunset.png'),
+      linear-gradient(180deg, #2b1e4a 0%, #5c3787 42%, #d97398 72%, #fca289 84%, #4ea832 84%, #5c3a21 90%);
+    background-size: cover, cover;
+    background-position: center bottom, center bottom;
+    background-repeat: no-repeat, no-repeat;
+    background-attachment: fixed, fixed;
+    image-rendering: pixelated;
+  }
+
+  /* CRT Scanline Overlay */
+  .scanlines {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 50;
+    background: linear-gradient(
+      rgba(72, 50, 122, 0) 50%,
+      rgba(35, 18, 65, 0.24) 50%
+    );
+    background-size: 100% 4px;
   }
 
   /* Header */
   header {
+    width: 100%;
     height: 64px;
-    background: #0b1120;
-    border-bottom: 2px solid var(--card-border);
+    border-bottom: 1px solid rgba(216, 180, 254, 0.3);
+    padding: 0 28px;
+    z-index: 10;
+    flex-shrink: 0;
+    background-color: rgba(53, 35, 93, 0.84);
+    backdrop-filter: blur(8px);
+    box-shadow: 0 4px 20px rgba(35, 18, 65, 0.45);
+    display: flex;
+    align-items: center;
+  }
+  .header-inner {
+    width: 100%;
+    max-width: 1400px;
+    margin: 0 auto;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 28px;
-    flex-shrink: 0;
   }
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-  }
-  .brand-text {
+  .brand-title {
+    font-family: var(--font-pixel);
     font-size: 22px;
     font-weight: 900;
-    letter-spacing: 1px;
-    background: linear-gradient(90deg, #ffffff, var(--accent-cyan));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
+    letter-spacing: 2px;
+    color: var(--sunset-gold);
+    text-transform: uppercase;
+    text-shadow: 0 0 12px rgba(255, 209, 82, 0.85), 2px 2px 0 #241442;
   }
   .header-right {
     display: flex;
     align-items: center;
     gap: 20px;
   }
-  .status-tag {
+  .live-status {
     display: flex;
     align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    color: var(--text-muted);
+    gap: 10px;
   }
-  .status-dot {
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    background: #ef4444;
-    box-shadow: 0 0 8px rgba(239, 68, 68, 0.7);
+  .live-dot {
+    width: 10px;
+    height: 10px;
+    background: var(--retro-green);
+    box-shadow: 0 0 8px var(--retro-green);
     animation: pulse 1.5s infinite;
   }
-  @keyframes pulse { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
-  .nav-link {
+  @keyframes pulse { 0% { opacity: 0.55; } 50% { opacity: 1; } 100% { opacity: 0.55; } }
+  .live-label {
+    font-family: var(--font-pixel);
     font-size: 12px;
     font-weight: 700;
-    text-transform: uppercase;
-    text-decoration: none;
-    color: var(--text-muted);
-    background: #1e293b;
-    padding: 6px 14px;
-    border-radius: 6px;
-    border: 1px solid var(--card-border);
-    transition: all 0.2s;
+    color: #fbcfe8;
+    letter-spacing: 1.5px;
   }
-  .nav-link:hover {
+  .v-sep {
+    height: 18px;
+    width: 1px;
+    background: rgba(192, 132, 252, 0.4);
+  }
+  .nav-btn {
+    text-decoration: none;
+    background: rgba(72, 50, 122, 0.92);
+    color: #fef9c3;
+    font-family: var(--font-pixel);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    padding: 8px 14px;
+    text-transform: uppercase;
+    box-shadow:
+      inset 0 0 0 2px rgba(45, 25, 75, 0.9),
+      0 0 0 2px var(--twilight-lilac);
+    transition: all 0.12s;
+  }
+  .nav-btn:hover {
+    background: #5c3e9b;
     color: #fff;
-    border-color: var(--accent-cyan);
-    box-shadow: 0 0 10px rgba(0, 242, 254, 0.25);
+    box-shadow:
+      inset 0 0 0 2px rgba(45, 25, 75, 0.9),
+      0 0 0 2px var(--sunset-pink),
+      0 0 10px rgba(234, 125, 139, 0.45);
   }
 
-  /* Main Grid */
+  /* Main Container */
   main {
     flex: 1;
+    width: 100%;
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 22px 28px 32px;
     display: flex;
     flex-direction: column;
-    padding: 20px 32px;
     overflow: hidden;
+    z-index: 10;
+  }
+  .pixel-panel {
+    flex: 1;
+    width: 100%;
+    border-radius: 6px;
+    padding: 22px 28px;
+    background-color: rgba(53, 35, 93, 0.86);
+    backdrop-filter: blur(10px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-shadow:
+      0 0 0 2px var(--sunset-pink),
+      0 0 0 4px var(--twilight-purple),
+      0 0 0 6px #241442,
+      0 15px 35px rgba(25, 10, 48, 0.65),
+      0 0 30px rgba(234, 125, 139, 0.28);
   }
 
-  /* Big Full-Width Leaderboard */
-  .leaderboard-container {
-    flex: 1;
-    background: var(--card-bg);
-    border: 1px solid var(--card-border);
-    border-radius: 14px;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    box-shadow: 0 12px 30px rgba(0,0,0,0.5);
-  }
-  .leaderboard-top {
-    padding: 14px 28px;
-    background: rgba(11, 17, 32, 0.7);
-    border-bottom: 1px solid var(--card-border);
+  /* Panel Top Bar */
+  .panel-top {
     display: grid;
     grid-template-columns: 1fr auto 1fr;
     align-items: center;
+    padding-bottom: 20px;
+    gap: 16px;
+    flex-shrink: 0;
   }
-  .leaderboard-title {
-    font-size: 1.35rem;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    font-weight: 800;
-    color: #fff;
+  .panel-title {
+    font-family: var(--font-pixel);
+    font-size: 26px;
+    font-weight: 900;
+    color: #ffffff;
+    letter-spacing: 0.25em;
     text-align: center;
+    text-shadow: 0 0 12px rgba(234, 125, 139, 0.85), 2px 2px 0 #241442;
   }
-  .tabs {
+  .game-modes {
     display: flex;
-    gap: 6px;
+    align-items: center;
+    gap: 10px;
     justify-self: end;
   }
   .tab-btn {
     cursor: pointer;
-    background: #090d16;
-    color: var(--text-muted);
-    border: 1px solid var(--card-border);
-    padding: 6px 12px;
-    border-radius: 6px;
-    font-size: 0.78rem;
-    font-weight: 800;
+    border: none;
+    background: rgba(72, 50, 122, 0.85);
+    color: #e9d5ff;
+    font-family: var(--font-pixel);
+    font-size: 12px;
+    font-weight: 700;
+    padding: 9px 14px;
+    letter-spacing: 1px;
     text-transform: uppercase;
-    letter-spacing: 0.8px;
-    transition: all 0.2s;
+    box-shadow:
+      inset 0 0 0 2px rgba(45, 25, 75, 0.9),
+      0 0 0 2px var(--twilight-lilac);
+    transition: all 0.12s;
   }
-  .tab-btn:hover { color: #fff; border-color: rgba(0, 242, 254, 0.5); }
+  .tab-btn:hover {
+    color: #fff;
+    box-shadow:
+      inset 0 0 0 2px rgba(45, 25, 75, 0.9),
+      0 0 0 2px var(--sunset-pink),
+      0 0 10px rgba(234, 125, 139, 0.45);
+  }
   .tab-btn.active {
-    background: linear-gradient(135deg, var(--accent-cyan), #0099ff);
-    color: #030712;
-    border-color: var(--accent-cyan);
-    box-shadow: 0 0 14px rgba(0, 242, 254, 0.45);
+    background: var(--retro-green);
+    color: #0f172a;
+    font-weight: 900;
+    box-shadow:
+      inset 0 0 0 2px #fff,
+      0 0 0 2px var(--retro-green),
+      0 0 14px rgba(88, 192, 56, 0.7);
   }
 
+  /* Table Container */
   .table-wrap {
     flex: 1;
-    padding: 16px 28px;
+    width: 100%;
     overflow-y: auto;
+    padding-right: 4px;
   }
   .lb-table {
     width: 100%;
     border-collapse: separate;
-    border-spacing: 0 8px;
+    border-spacing: 0 10px;
   }
   .lb-table th {
-    font-size: 13px;
-    font-weight: 700;
+    font-family: var(--font-pixel);
+    font-size: 11px;
+    font-weight: 800;
+    color: rgba(251, 207, 232, 0.95);
+    letter-spacing: 1.2px;
     text-transform: uppercase;
-    color: var(--text-muted);
     padding: 12px 18px;
     text-align: left;
-    border-bottom: 1px solid var(--card-border);
+    background: rgba(61, 39, 107, 0.8);
+    border-bottom: 1px solid rgba(249, 168, 212, 0.35);
   }
   .lb-table td {
-    background: #090e18;
     padding: 15px 18px;
     font-size: 16px;
-    font-weight: 600;
-    border-top: 1px solid rgba(255, 255, 255, 0.04);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    font-weight: 700;
+    background: rgba(72, 50, 122, 0.68);
+    border-top: 1px solid rgba(234, 125, 139, 0.22);
+    border-bottom: 1px solid rgba(234, 125, 139, 0.22);
+    transition: filter 0.12s;
+  }
+  .lb-table tbody tr:hover td {
+    filter: brightness(1.12);
   }
   .lb-table tr td:first-child {
-    border-top-left-radius: 10px;
-    border-bottom-left-radius: 10px;
-    border-left: 1px solid rgba(255, 255, 255, 0.04);
-    font-weight: 900;
-    font-size: 18px;
-    width: 90px;
+    border-left: 4px solid var(--twilight-lilac);
+    border-top-left-radius: 3px;
+    border-bottom-left-radius: 3px;
     text-align: center;
+    width: 100px;
+    font-family: var(--font-pixel);
+    font-size: 15px;
+    color: #e9d5ff;
   }
   .lb-table tr td:last-child {
-    border-top-right-radius: 10px;
-    border-bottom-right-radius: 10px;
-    border-right: 1px solid rgba(255, 255, 255, 0.04);
+    border-right: 1px solid rgba(234, 125, 139, 0.22);
+    border-top-right-radius: 3px;
+    border-bottom-right-radius: 3px;
   }
-  .rank-1 td { background: linear-gradient(90deg, rgba(250, 204, 21, 0.12), #090e18 50%); }
-  .rank-2 td { background: linear-gradient(90deg, rgba(226, 232, 240, 0.09), #090e18 50%); }
-  .rank-3 td { background: linear-gradient(90deg, rgba(249, 115, 22, 0.09), #090e18 50%); }
-  .rank-1-badge { color: var(--gold); text-shadow: 0 0 12px rgba(250, 204, 21, 0.5); }
-  .rank-2-badge { color: var(--silver); }
-  .rank-3-badge { color: var(--bronze); }
-  .score-val {
-    font-size: 22px;
-    font-weight: 900;
-    color: var(--accent-cyan);
-    font-variant-numeric: tabular-nums;
+
+  /* Gold / Silver / Bronze Podium Rows */
+  .rank-1 td {
+    background: linear-gradient(90deg, rgba(255, 209, 82, 0.32) 0%, rgba(72, 50, 122, 0.78) 45%, rgba(53, 35, 93, 0.88) 100%);
+    border-top-color: rgba(255, 209, 82, 0.45);
+    border-bottom-color: rgba(255, 209, 82, 0.45);
   }
+  .rank-1 td:first-child {
+    border-left: 4px solid var(--sunset-gold);
+    color: var(--sunset-gold);
+    text-shadow: 0 0 8px rgba(255, 209, 82, 0.9);
+  }
+  .rank-1 .name-cell {
+    color: var(--sunset-gold);
+    text-shadow: 0 0 6px rgba(255, 209, 82, 0.6);
+  }
+  .rank-1 .stat-cell { color: var(--sunset-gold); }
+
+  .rank-2 td {
+    background: linear-gradient(90deg, rgba(226, 232, 240, 0.25) 0%, rgba(72, 50, 122, 0.78) 45%, rgba(53, 35, 93, 0.88) 100%);
+    border-top-color: rgba(226, 232, 240, 0.35);
+    border-bottom-color: rgba(226, 232, 240, 0.35);
+  }
+  .rank-2 td:first-child {
+    border-left: 4px solid #e2e8f0;
+    color: #ffffff;
+    text-shadow: 0 0 8px rgba(255, 255, 255, 0.8);
+  }
+  .rank-2 .name-cell { color: #ffffff; }
+  .rank-2 .stat-cell { color: #f3e8ff; }
+
+  .rank-3 td {
+    background: linear-gradient(90deg, rgba(252, 162, 137, 0.28) 0%, rgba(72, 50, 122, 0.78) 45%, rgba(53, 35, 93, 0.88) 100%);
+    border-top-color: rgba(252, 162, 137, 0.4);
+    border-bottom-color: rgba(252, 162, 137, 0.4);
+  }
+  .rank-3 td:first-child {
+    border-left: 4px solid var(--sunset-peach);
+    color: var(--sunset-peach);
+    text-shadow: 0 0 8px rgba(252, 162, 137, 0.8);
+  }
+  .rank-3 .name-cell { color: var(--sunset-peach); }
+  .rank-3 .stat-cell { color: var(--sunset-peach); }
+
   .pid-tag {
-    background: #1e293b;
-    padding: 4px 10px;
-    border-radius: 6px;
-    font-size: 13px;
-    color: #cbd5e1;
-    font-family: monospace;
-    margin-right: 8px;
+    display: inline-block;
+    font-family: var(--font-pixel);
+    font-size: 12px;
+    background: var(--twilight-dark);
+    color: #fef08a;
+    padding: 4px 9px;
+    border: 1px solid rgba(255, 209, 82, 0.55);
+  }
+  .name-cell {
+    font-family: var(--font-pixel);
+    font-size: 15px;
+    color: #f3e8ff;
+    letter-spacing: 0.5px;
+  }
+  .score-val {
+    font-family: var(--font-pixel);
+    font-size: 18px;
+    font-weight: 900;
+    color: var(--neon-cyan);
+    letter-spacing: 1px;
+    text-shadow: 0 0 8px rgba(0, 240, 255, 0.75);
+  }
+  .stat-cell {
+    font-family: var(--font-pixel);
+    font-size: 14px;
+    color: #e9d5ff;
+    text-align: center;
   }
   .empty-board {
     text-align: center;
-    padding: 120px 20px;
-    color: var(--text-muted);
-    font-size: 18px;
+    padding: 110px 20px;
+    font-family: var(--font-pixel);
+    font-size: 14px;
+    line-height: 1.9;
+    color: #fbcfe8;
   }
 </style>
 </head>
 <body>
+<div class="scanlines"></div>
 
 <header>
-  <div class="brand">
-    <div class="brand-text">DODGE &amp; DRIP</div>
-  </div>
-  <div class="header-right">
-    <div class="status-tag">
-      <span class="status-dot"></span> LIVE RESULTS
+  <div class="header-inner">
+    <div class="brand-title">DODGE &amp; DRIP</div>
+    <div class="header-right">
+      <div class="live-status">
+        <span class="live-dot"></span>
+        <span class="live-label">LIVE RESULTS</span>
+      </div>
+      <div class="v-sep"></div>
+      <a href="/register" class="nav-btn">REGISTRATION PANEL</a>
     </div>
-    <span style="color: var(--card-border);">|</span>
-    <a href="/register" class="nav-link">REGISTRATION PANEL</a>
   </div>
 </header>
 
 <main>
-  <!-- Full-Width Massive Leaderboard -->
-  <section class="leaderboard-container">
-    <div class="leaderboard-top">
+  <section class="pixel-panel">
+    <div class="panel-top">
       <div></div>
-      <div class="leaderboard-title">LEADERBOARD</div>
-      <div class="tabs">
-        <button class="tab-btn active" data-game="dodge" onclick="switchTab('dodge')">Dodge</button>
-        <button class="tab-btn" data-game="wall" onclick="switchTab('wall')">Wall Shape</button>
-        <button class="tab-btn" data-game="dance" onclick="switchTab('dance')">Dance</button>
+      <h2 class="panel-title">LEADERBOARD</h2>
+      <div class="game-modes">
+        <button class="tab-btn active" data-game="dodge" onclick="switchTab('dodge')">DODGE</button>
+        <button class="tab-btn" data-game="wall" onclick="switchTab('wall')">WALL SHAPE</button>
+        <button class="tab-btn" data-game="dance" onclick="switchTab('dance')">DANCE</button>
       </div>
     </div>
+
     <div class="table-wrap">
       <table class="lb-table" id="lb-table">
         <thead>
           <tr>
-            <th style="width: 90px; text-align: center;">Rank</th>
-            <th style="width: 140px;">Player ID</th>
-            <th>Player Name</th>
-            <th style="width: 160px;">Score</th>
-            <th style="width: 140px;">Accuracy</th>
-            <th style="width: 140px;">Best Streak</th>
+            <th style="width: 100px; text-align: center;">RANK</th>
+            <th style="width: 140px; text-align: center;">PLAYER ID</th>
+            <th>PLAYER NAME</th>
+            <th style="width: 170px;">SCORE</th>
+            <th style="width: 150px; text-align: center;">ACCURACY</th>
+            <th style="width: 160px; text-align: center;">BEST STREAK</th>
           </tr>
         </thead>
         <tbody id="lb-body">
@@ -539,7 +677,7 @@ def big_screen_display() -> str:
         </tbody>
       </table>
       <div id="lb-empty" class="empty-board" style="display:none;">
-        No scores recorded yet for this event.<br>Step on the arena tiles and claim the top rank!
+        NO SCORES RECORDED YET FOR THIS EVENT.<br>STEP ON THE ARENA TILES AND CLAIM THE TOP RANK!
       </div>
     </div>
   </section>
@@ -587,22 +725,22 @@ def big_screen_display() -> str:
 
     tbody.innerHTML = rows.map((r, i) => {
       const rank = i + 1;
-      let rankText = '#' + rank;
+      let rankHtml = '#' + rank;
       let rowClass = '';
-      if (rank === 1) { rankText = '🥇 1'; rowClass = 'rank-1 rank-1-badge'; }
-      else if (rank === 2) { rankText = '🥈 2'; rowClass = 'rank-2 rank-2-badge'; }
-      else if (rank === 3) { rankText = '🥉 3'; rowClass = 'rank-3 rank-3-badge'; }
+      if (rank === 1) { rankHtml = '★ 1'; rowClass = 'rank-1'; }
+      else if (rank === 2) { rankHtml = '★ 2'; rowClass = 'rank-2'; }
+      else if (rank === 3) { rankHtml = '★ 3'; rowClass = 'rank-3'; }
 
       const acc = r.accuracy != null ? (r.accuracy * 100).toFixed(0) + '%' : '-';
       const streak = r.best_streak ?? '-';
 
       return `<tr class="${rowClass}">
-        <td>${rankText}</td>
-        <td><span class="pid-tag">${r.player_id}</span></td>
-        <td style="font-weight: 700; font-size: 16px;">${r.name || r.player_id}</td>
+        <td>${rankHtml}</td>
+        <td style="text-align: center;"><span class="pid-tag">${r.player_id}</span></td>
+        <td class="name-cell">${r.name || r.player_id}</td>
         <td class="score-val">${r.score}</td>
-        <td>${acc}</td>
-        <td>${streak}</td>
+        <td class="stat-cell">${acc}</td>
+        <td class="stat-cell">${streak}</td>
       </tr>`;
     }).join('');
   }
@@ -622,63 +760,144 @@ def operator_desk() -> str:
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dodge &amp; Drip // Operator Registration Desk</title>
+<title>Dodge &amp; Drip - Player Registration</title>
 <style>
   :root {
-    --bg-dark: #090d16;
-    --card-bg: #121826;
-    --card-border: #1e293b;
-    --accent-cyan: #00f2fe;
-    --accent-purple: #9d4edd;
-    --accent-green: #10b981;
-    --text-primary: #f8fafc;
-    --text-muted: #94a3b8;
+    --twilight-dark: #35235d;
+    --twilight-purple: #48327a;
+    --twilight-lilac: #9b74b8;
+    --sunset-pink: #ea7d8b;
+    --sunset-peach: #fca289;
+    --sunset-gold: #ffd152;
+    --retro-green: #58c038;
+    --neon-cyan: #00f0ff;
+    --input-bg: #241645;
+    --font-pixel: "Consolas", "Courier New", monospace;
+    --font-retro: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
   }
-  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    background-color: var(--bg-dark);
-    color: var(--text-primary);
     height: 100vh;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     user-select: none;
+    color: #f8fafc;
+    font-family: var(--font-retro);
+    background-color: #2c1b4e;
+    background-image:
+      url('/static/bg-sunset.png'),
+      linear-gradient(180deg, #2b1e4a 0%, #5c3787 42%, #d97398 72%, #fca289 84%, #4ea832 84%, #5c3a21 90%);
+    background-size: cover, cover;
+    background-position: center bottom, center bottom;
+    background-repeat: no-repeat, no-repeat;
+    background-attachment: fixed, fixed;
+    image-rendering: pixelated;
   }
+
+  /* CRT Scanline Overlay */
+  .scanlines {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 50;
+    background: linear-gradient(
+      rgba(72, 50, 122, 0) 50%,
+      rgba(35, 18, 65, 0.22) 50%
+    );
+    background-size: 100% 4px;
+  }
+
+  /* Custom Scrollbar */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: #251642; }
+  ::-webkit-scrollbar-thumb { background: #48327a; border: 1px solid #9b74b8; }
+  ::-webkit-scrollbar-thumb:hover { background: #ea7d8b; }
 
   /* Header */
   header {
-    height: 56px;
-    background: #0f172a;
-    border-bottom: 1px solid var(--card-border);
+    width: 100%;
+    height: 58px;
+    border-bottom: 1px solid rgba(216, 180, 254, 0.3);
+    padding: 0 24px;
+    z-index: 10;
+    flex-shrink: 0;
+    background-color: rgba(53, 35, 93, 0.86);
+    backdrop-filter: blur(8px);
+    box-shadow: 0 4px 20px rgba(35, 18, 65, 0.5);
+    display: flex;
+    align-items: center;
+  }
+  .header-inner {
+    width: 100%;
+    max-width: 1700px;
+    margin: 0 auto;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 24px;
-    flex-shrink: 0;
   }
-  .brand {
+  .brand-title {
+    font-family: var(--font-pixel);
+    font-size: 20px;
+    font-weight: 900;
+    letter-spacing: 2px;
+    color: var(--sunset-gold);
+    text-transform: uppercase;
+    text-shadow: 0 0 10px rgba(255, 209, 82, 0.85), 2px 2px 0 #241442;
+  }
+  .header-right {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 18px;
   }
-  .brand-text {
-    font-size: 18px;
-    font-weight: 800;
-    color: #fff;
+  .live-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
-  .nav-link {
-    font-size: 12px;
+  .live-dot {
+    width: 9px;
+    height: 9px;
+    background: var(--retro-green);
+    box-shadow: 0 0 8px var(--retro-green);
+    animation: pulse 1.5s infinite;
+  }
+  @keyframes pulse { 0% { opacity: 0.55; } 50% { opacity: 1; } 100% { opacity: 0.55; } }
+  .live-label {
+    font-family: var(--font-pixel);
+    font-size: 11px;
     font-weight: 700;
-    text-transform: uppercase;
-    text-decoration: none;
-    color: var(--text-muted);
-    background: #1e293b;
-    padding: 6px 14px;
-    border-radius: 6px;
-    border: 1px solid var(--card-border);
-    transition: all 0.2s;
+    color: #fbcfe8;
+    letter-spacing: 1.2px;
   }
-  .nav-link:hover { color: #fff; border-color: var(--accent-cyan); }
+  .v-sep {
+    height: 16px;
+    width: 1px;
+    background: rgba(192, 132, 252, 0.4);
+  }
+  .nav-btn {
+    text-decoration: none;
+    background: rgba(72, 50, 122, 0.92);
+    color: #fef9c3;
+    font-family: var(--font-pixel);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding: 7px 14px;
+    text-transform: uppercase;
+    box-shadow:
+      inset 0 0 0 2px rgba(45, 25, 75, 0.9),
+      0 0 0 2px var(--twilight-lilac);
+    transition: all 0.12s;
+  }
+  .nav-btn:hover {
+    background: #5c3e9b;
+    color: #fff;
+    box-shadow:
+      inset 0 0 0 2px rgba(45, 25, 75, 0.9),
+      0 0 0 2px var(--sunset-pink),
+      0 0 10px rgba(234, 125, 139, 0.45);
+  }
 
   /* Main Split */
   main {
@@ -686,14 +905,18 @@ def operator_desk() -> str:
     display: flex;
     flex-direction: row;
     gap: 0;
-    padding: 16px;
+    padding: 18px 22px;
+    max-width: 1700px;
+    width: 100%;
+    margin: 0 auto;
     overflow: hidden;
     position: relative;
+    z-index: 10;
   }
 
   /* Interactive Drag-to-Resize Divider */
   .drag-divider {
-    width: 14px;
+    width: 16px;
     margin: 0 4px;
     cursor: col-resize;
     position: relative;
@@ -711,290 +934,438 @@ def operator_desk() -> str:
     top: 8px;
     bottom: 8px;
     width: 2px;
-    background: var(--card-border);
-    border-radius: 2px;
+    background: rgba(155, 116, 184, 0.5);
     transition: background-color 0.2s, box-shadow 0.2s, width 0.2s;
   }
   .drag-divider:hover::before,
   .drag-divider.dragging::before {
-    background: var(--accent-cyan);
-    box-shadow: 0 0 10px var(--accent-cyan);
+    background: var(--sunset-pink);
+    box-shadow: 0 0 10px var(--sunset-pink);
     width: 4px;
   }
   .drag-handle {
     width: 6px;
     height: 36px;
-    border-radius: 3px;
-    background: #1e293b;
-    border: 1px solid var(--card-border);
+    background: var(--twilight-purple);
+    border: 1px solid var(--sunset-pink);
     position: absolute;
     transition: all 0.2s;
   }
   .drag-divider:hover .drag-handle,
   .drag-divider.dragging .drag-handle {
-    background: var(--accent-cyan);
-    border-color: var(--accent-cyan);
-    box-shadow: 0 0 8px rgba(0, 242, 254, 0.7);
+    background: var(--sunset-gold);
+    border-color: #fff;
+    box-shadow: 0 0 8px rgba(255, 209, 82, 0.8);
   }
 
-  .panel {
-    background: var(--card-bg);
-    border: 1px solid var(--card-border);
-    border-radius: 12px;
+  /* Sunset Arcade Panels */
+  .pixel-panel {
+    background-color: rgba(53, 35, 93, 0.88);
+    backdrop-filter: blur(10px);
+    border-radius: 6px;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    box-shadow:
+      0 0 0 2px var(--sunset-pink),
+      0 0 0 4px var(--twilight-purple),
+      0 0 0 6px #241442,
+      0 15px 35px rgba(25, 10, 48, 0.65),
+      0 0 25px rgba(234, 125, 139, 0.22);
   }
   .panel-header {
-    padding: 12px 18px;
-    background: rgba(15, 23, 42, 0.6);
-    border-bottom: 1px solid var(--card-border);
+    padding: 14px 20px;
+    border-bottom: 1px solid rgba(249, 168, 212, 0.3);
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-shrink: 0;
   }
   .panel-title {
-    font-size: 14px;
-    font-weight: 700;
-    display: flex;
-    align-items: center;
-    gap: 8px;
+    font-family: var(--font-pixel);
+    font-size: 16px;
+    font-weight: 800;
+    color: #ffffff;
+    letter-spacing: 0.8px;
+    text-shadow: 0 0 8px rgba(234, 125, 139, 0.65);
   }
   .panel-content {
     flex: 1;
-    padding: 16px;
+    padding: 16px 20px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 13px;
   }
 
   /* Form Elements */
   .form-group {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 6px;
   }
   .form-group label {
+    font-family: var(--font-pixel);
     font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
-    color: var(--text-muted);
-    letter-spacing: 0.5px;
+    color: #fbcfe8;
+    letter-spacing: 1px;
   }
+  .req-star { color: var(--neon-cyan); }
   .form-row {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 10px;
+    gap: 12px;
   }
-  input[type="text"], input[type="number"] {
-    background: #090d16;
-    border: 1px solid var(--card-border);
-    border-radius: 8px;
-    padding: 9px 12px;
-    color: #fff;
-    font-size: 13px;
+  .pixel-input {
+    width: 100%;
+    background-color: var(--input-bg);
+    border: 2px solid #5a3c8c;
+    box-shadow: inset 2px 2px 0 #140b29;
+    border-radius: 4px;
+    padding: 10px 13px;
+    color: #fef9c3;
+    font-family: var(--font-pixel);
+    font-size: 14px;
+    letter-spacing: 0.5px;
     outline: none;
-    transition: border-color 0.2s, box-shadow 0.2s;
+    transition: border-color 0.15s, box-shadow 0.15s;
   }
-  input[type="text"]:focus, input[type="number"]:focus {
-    border-color: var(--accent-cyan);
-    box-shadow: 0 0 0 2px rgba(0, 242, 254, 0.2);
+  .pixel-input::placeholder { color: #a855f7; opacity: 0.75; }
+  .pixel-input:focus {
+    border-color: var(--sunset-pink);
+    box-shadow: inset 2px 2px 0 #140b29, 0 0 10px rgba(234, 125, 139, 0.55);
   }
 
-  /* Camera preview */
+  /* Camera Viewfinder */
   .camera-container {
     position: relative;
     width: 100%;
     aspect-ratio: 4 / 3;
-    max-height: 46vh;
-    background: #06090e;
-    border: 1px solid var(--card-border);
-    border-radius: 10px;
+    max-height: 44vh;
+    background: #1a0e30;
+    border: 2px solid #5a3c8c;
+    border-radius: 4px;
     overflow: hidden;
     display: flex;
     align-items: center;
     justify-content: center;
+    box-shadow: inset 0 0 18px rgba(0, 0, 0, 0.7);
   }
   video {
     width: 100%;
     height: 100%;
     object-fit: cover;
-    border-radius: 10px;
     transform: scaleX(-1);
   }
-  .camera-badge {
+  .vf-corner {
     position: absolute;
-    top: 6px;
-    left: 6px;
-    background: rgba(0, 0, 0, 0.7);
+    width: 14px;
+    height: 14px;
+    pointer-events: none;
+    z-index: 10;
+    filter: drop-shadow(0 0 4px var(--neon-cyan));
+  }
+  .vf-tl { top: 8px; left: 8px; border-top: 2px solid var(--neon-cyan); border-left: 2px solid var(--neon-cyan); }
+  .vf-tr { top: 8px; right: 8px; border-top: 2px solid var(--neon-cyan); border-right: 2px solid var(--neon-cyan); }
+  .vf-bl { bottom: 8px; left: 8px; border-bottom: 2px solid var(--neon-cyan); border-left: 2px solid var(--neon-cyan); }
+  .vf-br { bottom: 8px; right: 8px; border-bottom: 2px solid var(--neon-cyan); border-right: 2px solid var(--neon-cyan); }
+  .vf-rec {
+    position: absolute;
+    top: 10px;
+    left: 26px;
+    z-index: 10;
+    font-family: var(--font-pixel);
+    font-size: 9px;
+    color: #fbcfe8;
+    background: rgba(43, 24, 74, 0.9);
     padding: 2px 7px;
+    border: 1px solid rgba(244, 114, 182, 0.35);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    pointer-events: none;
+  }
+  .vf-rec-dot {
+    width: 6px;
+    height: 6px;
+    background: var(--retro-green);
+    box-shadow: 0 0 5px var(--retro-green);
+    animation: pulse 1.2s infinite;
+  }
+  .vf-sensor {
+    position: absolute;
+    top: 10px;
+    right: 26px;
+    z-index: 10;
+    font-family: var(--font-pixel);
+    font-size: 9px;
+    color: var(--neon-cyan);
+    background: rgba(43, 24, 74, 0.9);
+    padding: 2px 7px;
+    border: 1px solid rgba(0, 240, 255, 0.45);
+    text-shadow: 0 0 4px var(--neon-cyan);
+    pointer-events: none;
+  }
+  .vf-guide {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    z-index: 10;
+  }
+  .vf-guide-box {
+    width: 136px;
+    height: 164px;
+    border: 1px dashed rgba(0, 240, 255, 0.45);
     border-radius: 4px;
-    font-size: 10px;
-    font-weight: 700;
-    color: var(--accent-cyan);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px;
+  }
+  .vf-guide-top {
+    font-family: var(--font-pixel);
+    font-size: 8px;
+    color: rgba(0, 240, 255, 0.85);
+    background: rgba(26, 14, 48, 0.85);
+    padding: 1px 5px;
+    letter-spacing: 1px;
+  }
+  .vf-guide-bot {
+    font-family: var(--font-pixel);
+    font-size: 7px;
+    color: rgba(0, 240, 255, 0.65);
   }
   .camera-placeholder {
     position: absolute;
-    color: var(--text-muted);
-    font-size: 12px;
+    color: #fbcfe8;
+    font-family: var(--font-pixel);
+    font-size: 11px;
+    line-height: 1.6;
     text-align: center;
-    padding: 10px;
+    padding: 14px;
+    background: rgba(26, 14, 48, 0.85);
+    z-index: 12;
   }
 
-  /* Buttons */
+  /* Retro 3D Arcade Buttons */
   .btn-group {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    margin-top: 4px;
+    gap: 10px;
+    margin-top: 2px;
   }
   button {
     cursor: pointer;
     border: none;
-    border-radius: 8px;
-    padding: 10px 14px;
-    font-size: 13px;
-    font-weight: 700;
+    border-radius: 4px;
+    font-family: var(--font-pixel);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    transition: all 0.1s;
   }
   .btn-primary {
-    background: linear-gradient(135deg, var(--accent-cyan), #00aaff);
-    color: #030712;
-    box-shadow: 0 4px 12px rgba(0, 242, 254, 0.3);
+    background: var(--retro-green);
+    color: #14260d;
+    padding: 13px 16px;
+    font-size: 13px;
+    font-weight: 900;
+    box-shadow:
+      inset 0 3px 0 #a7f3d0,
+      inset 0 -4px 0 #15803d,
+      0 4px 0 #000,
+      0 0 14px rgba(88, 192, 56, 0.55);
+  }
+  .btn-primary:hover { background: #68d644; }
+  .btn-primary:active {
+    transform: translateY(2px);
+    box-shadow:
+      inset 0 2px 0 #a7f3d0,
+      inset 0 -2px 0 #15803d,
+      0 2px 0 #000;
   }
   .btn-secondary {
-    background: #1e293b;
-    color: var(--text-muted);
-    border: 1px solid var(--card-border);
+    background: rgba(72, 50, 122, 0.92);
+    color: #fce7f3;
+    padding: 11px 16px;
+    font-size: 11px;
+    font-weight: 700;
+    border: 1px solid rgba(192, 132, 252, 0.45);
+    box-shadow:
+      inset 0 2px 0 #6d4a96,
+      inset 0 -3px 0 #1e0f36,
+      0 3px 0 #000;
   }
-  .btn-secondary:hover { color: #fff; }
+  .btn-secondary:hover {
+    background: #583d94;
+    color: #fff;
+    box-shadow:
+      inset 0 2px 0 #8b5fb8,
+      inset 0 -3px 0 #1e0f36,
+      0 3px 0 var(--sunset-pink);
+  }
 
-  /* Success Card */
+  /* Assigned / Warning Status Cards */
   .registered-card {
     display: none;
-    background: linear-gradient(135deg, rgba(0, 242, 254, 0.08), rgba(157, 78, 221, 0.08));
-    border: 1px solid rgba(0, 242, 254, 0.4);
-    border-radius: 10px;
-    padding: 12px;
-    margin-top: 4px;
+    background: rgba(36, 22, 69, 0.92);
+    border: 2px solid var(--neon-cyan);
+    border-radius: 4px;
+    padding: 12px 14px;
+    margin-top: 2px;
+    box-shadow: 0 0 15px rgba(0, 240, 255, 0.25);
   }
   .reg-tag {
+    font-family: var(--font-pixel);
     font-size: 28px;
     font-weight: 900;
-    color: var(--accent-cyan);
-    letter-spacing: 1px;
-    text-shadow: 0 0 14px rgba(0, 242, 254, 0.4);
+    color: var(--neon-cyan);
+    letter-spacing: 2px;
+    margin: 4px 0;
+    text-shadow: 0 0 14px rgba(0, 240, 255, 0.6);
   }
 
-  /* Right Side: Roster */
-  .search-bar {
-    width: 100%;
-    margin-bottom: 10px;
-    background: #090d16;
-    border: 1px solid var(--card-border);
-    border-radius: 8px;
-    padding: 9px 12px;
-    color: #fff;
-    font-size: 13px;
-  }
+  /* Right Side: Roster Table */
   .roster-table {
     width: 100%;
     border-collapse: collapse;
   }
   .roster-table th {
-    background: #090d16;
-    padding: 9px 12px;
-    font-size: 11px;
-    font-weight: 700;
+    background: rgba(61, 39, 107, 0.85);
+    padding: 11px 12px;
+    font-family: var(--font-pixel);
+    font-size: 10px;
+    font-weight: 800;
     text-transform: uppercase;
-    color: var(--text-muted);
+    letter-spacing: 1px;
+    color: #fbcfe8;
     text-align: left;
-    border-bottom: 1px solid var(--card-border);
+    border-bottom: 1px solid rgba(249, 168, 212, 0.35);
+    position: sticky;
+    top: 0;
+    z-index: 2;
   }
   .roster-table td {
-    padding: 8px 12px;
-    font-size: 13px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    padding: 10px 12px;
+    font-size: 14px;
+    border-bottom: 1px solid rgba(168, 85, 247, 0.22);
+    transition: background-color 0.2s, box-shadow 0.2s;
+  }
+  .roster-table tbody tr:hover td {
+    background: rgba(72, 50, 122, 0.55);
+  }
+  .roster-table tbody tr.row-highlight td {
+    background: rgba(255, 209, 82, 0.22) !important;
+    border-top: 1px solid var(--sunset-gold);
+    border-bottom: 1px solid var(--sunset-gold);
   }
   .thumb-img {
-    width: 32px;
-    height: 32px;
-    border-radius: 6px;
+    width: 34px;
+    height: 34px;
+    border-radius: 4px;
     object-fit: cover;
-    background: #1e293b;
+    background: #2b184a;
+    border: 1px solid rgba(192, 132, 252, 0.45);
   }
   .thumb-placeholder {
-    width: 32px;
-    height: 32px;
-    border-radius: 6px;
-    background: #1e293b;
+    width: 34px;
+    height: 34px;
+    border-radius: 4px;
+    background: #2b184a;
+    border: 1px solid rgba(192, 132, 252, 0.45);
     display: flex;
     align-items: center;
     justify-content: center;
     font-size: 14px;
-    color: var(--text-muted);
-  }
-  .pid-badge {
-    background: #1e293b;
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-family: monospace;
-    font-size: 12px;
-    color: var(--accent-cyan);
-  }
-  .roll-badge {
-    background: rgba(157, 78, 221, 0.15);
-    border: 1px solid rgba(157, 78, 221, 0.3);
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-family: monospace;
-    font-size: 11px;
     color: #d8b4fe;
   }
-
+  .pid-badge {
+    font-family: var(--font-pixel);
+    font-size: 12px;
+    font-weight: 800;
+    color: var(--neon-cyan);
+    text-shadow: 0 0 6px rgba(0, 240, 255, 0.7);
+  }
+  .roll-badge {
+    display: inline-block;
+    background: var(--twilight-dark);
+    border: 1px solid rgba(234, 125, 139, 0.5);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-family: var(--font-pixel);
+    font-size: 11px;
+    color: #fbcfe8;
+  }
+  .height-cell {
+    font-family: var(--font-pixel);
+    font-size: 13px;
+    color: var(--sunset-peach);
+  }
 </style>
 </head>
 <body>
+<div class="scanlines"></div>
 
 <header>
-  <div class="brand">
-    <div class="brand-text">DODGE &amp; DRIP</div>
-  </div>
-  <div>
-    <a href="/" class="nav-link">LEADERBOARD</a>
+  <div class="header-inner">
+    <div class="brand-title">DODGE &amp; DRIP</div>
+    <div class="header-right">
+      <div class="live-status">
+        <span class="live-dot"></span>
+        <span class="live-label">LIVE REGISTRATION</span>
+      </div>
+      <div class="v-sep"></div>
+      <a href="/" class="nav-btn">LEADERBOARD</a>
+    </div>
   </div>
 </header>
 
 <main>
   <!-- Left Side: Registration Form -->
-  <section class="panel" id="left-panel" style="width: 420px; flex-shrink: 0; min-width: 280px;">
+  <section class="pixel-panel" id="left-panel" style="width: 440px; flex-shrink: 0; min-width: 300px;">
     <div class="panel-header">
       <div class="panel-title">Player Registration</div>
     </div>
     <div class="panel-content">
       <div class="form-group">
-        <label for="player-name">PLAYER NAME *</label>
-        <input type="text" id="player-name" placeholder="e.g. Ravi" autocomplete="off" autofocus />
+        <label for="player-name">PLAYER NAME <span class="req-star">*</span></label>
+        <input type="text" id="player-name" class="pixel-input" placeholder="e.g. Ravi" autocomplete="off" autofocus />
       </div>
 
       <div class="form-row">
         <div class="form-group">
           <label for="player-roll">URN</label>
-          <input type="text" id="player-roll" placeholder="e.g. 24303192" autocomplete="off" />
+          <input type="text" id="player-roll" class="pixel-input" placeholder="e.g. 24303192" autocomplete="off" />
         </div>
         <div class="form-group">
           <label for="player-height">HEIGHT (CM)</label>
-          <input type="number" id="player-height" placeholder="e.g. 153" min="100" max="230" />
+          <input type="number" id="player-height" class="pixel-input" placeholder="e.g. 153" min="100" max="230" />
         </div>
       </div>
 
       <div class="form-group">
-        <label>Live Webcam Photo</label>
+        <label>LIVE WEBCAM PHOTO</label>
         <div class="camera-container">
-          <div class="camera-badge">Live Webcam</div>
+          <div class="vf-corner vf-tl"></div>
+          <div class="vf-corner vf-tr"></div>
+          <div class="vf-corner vf-bl"></div>
+          <div class="vf-corner vf-br"></div>
+          <div class="vf-rec"><span class="vf-rec-dot"></span><span>REC 720P</span></div>
+          <div class="vf-sensor">[ SENSOR ACTIVE ]</div>
+          <div class="vf-guide">
+            <div class="vf-guide-box">
+              <span class="vf-guide-top">FACE ALIGN</span>
+              <span class="vf-guide-bot">[ READY ]</span>
+            </div>
+          </div>
           <video id="webcam" autoplay playsinline muted></video>
           <div id="cam-placeholder" class="camera-placeholder" style="display:none;">
-            Webcam access disabled or unavailable.<br>Player can still be registered without a photo.
+            WEBCAM UNAVAILABLE.<br>PLAYER CAN STILL REGISTER WITHOUT A PHOTO.
           </div>
         </div>
       </div>
@@ -1005,21 +1376,21 @@ def operator_desk() -> str:
       </div>
 
       <div id="reg-success" class="registered-card">
-        <div style="font-size: 11px; font-weight: 700; color: var(--accent-green);">✓ ASSIGNED PLAYER ID</div>
+        <div style="font-family: var(--font-pixel); font-size: 11px; font-weight: 800; color: var(--retro-green);">✓ ASSIGNED PLAYER ID</div>
         <div class="reg-tag" id="reg-pid">P001</div>
-        <div style="font-size: 13px; color: #fff;" id="reg-name">Name: Ravi</div>
-        <div style="font-size: 12px; color: var(--text-muted);" id="reg-roll">URN: 24303192</div>
-        <div style="font-size: 11px; color: var(--accent-cyan); margin-top: 6px;">
+        <div style="font-size: 13px; font-weight: 700; color: #fff;" id="reg-name">Name: Ravi</div>
+        <div style="font-size: 12px; color: #fbcfe8;" id="reg-roll">URN: 24303192</div>
+        <div style="font-size: 11px; color: var(--neon-cyan); margin-top: 6px;">
           Send player to Station A or Station B with this ID!
         </div>
       </div>
 
-      <div id="reg-warning" class="registered-card" style="display:none; border-color: rgba(239, 68, 68, 0.6); background: rgba(239, 68, 68, 0.1);">
-        <div style="font-size: 11px; font-weight: 800; color: #ef4444; letter-spacing: 0.5px;">⚠️ ALREADY REGISTERED</div>
-        <div class="reg-tag" id="warn-pid" style="color: #ef4444; text-shadow: 0 0 14px rgba(239, 68, 68, 0.4);">P001</div>
+      <div id="reg-warning" class="registered-card" style="display:none; border-color: var(--sunset-pink); box-shadow: 0 0 15px rgba(234, 125, 139, 0.35);">
+        <div style="font-family: var(--font-pixel); font-size: 11px; font-weight: 800; color: var(--sunset-pink);">⚠️ ALREADY REGISTERED</div>
+        <div class="reg-tag" id="warn-pid" style="color: var(--sunset-pink); text-shadow: 0 0 14px rgba(234, 125, 139, 0.5);">P001</div>
         <div style="font-size: 13px; color: #fff; font-weight: 700;" id="warn-name">Name: Drishti</div>
-        <div style="font-size: 12px; color: #fca5a5; margin-top: 2px;" id="warn-detail">URN 24303192 already registered!</div>
-        <div style="font-size: 11px; color: #fde047; margin-top: 6px;">
+        <div style="font-size: 12px; color: #fbcfe8; margin-top: 2px;" id="warn-detail">URN 24303192 already registered!</div>
+        <div style="font-size: 11px; color: var(--sunset-gold); margin-top: 6px;">
           Give player their existing Player ID.
         </div>
       </div>
@@ -1032,32 +1403,30 @@ def operator_desk() -> str:
   </div>
 
   <!-- Right Side: Roster Table -->
-  <section class="panel" id="right-panel" style="flex: 1; min-width: 280px;">
+  <section class="pixel-panel" id="right-panel" style="flex: 1; min-width: 300px;">
     <div class="panel-header">
-      <div class="panel-title">
-        <span>Registered Participants</span>
-      </div>
-      <span id="player-count" style="font-size: 11px; color: var(--accent-cyan); font-weight: 700;">Total: 0</span>
+      <div class="panel-title">Registered Participants</div>
+      <span id="player-count" style="font-family: var(--font-pixel); font-size: 13px; color: var(--sunset-gold); font-weight: 800; text-shadow: 0 0 6px rgba(255, 209, 82, 0.6);">Total: 0</span>
     </div>
-    <div class="panel-content" style="padding: 14px;">
-      <input type="text" id="roster-search" class="search-bar" placeholder="Search by Name, URN, or Player ID (e.g. P001, 24303192)..." oninput="filterRoster()" />
+    <div class="panel-content" style="padding: 16px 20px;">
+      <input type="text" id="roster-search" class="pixel-input" placeholder="Search by Name, URN, or Player ID (e.g. P001, 24303192)..." oninput="filterRoster()" />
       <div style="flex: 1; overflow-y: auto;">
         <table class="roster-table">
           <thead>
             <tr>
-              <th style="width: 44px;">Photo</th>
-              <th>Player ID</th>
-              <th>Name</th>
+              <th style="width: 54px;">PHOTO</th>
+              <th>PLAYER ID</th>
+              <th>NAME</th>
               <th>URN</th>
-              <th>Height</th>
+              <th>HEIGHT</th>
             </tr>
           </thead>
           <tbody id="roster-body">
             <!-- Dynamically populated -->
           </tbody>
         </table>
-        <div id="roster-empty" style="text-align: center; padding: 40px; color: var(--text-muted); font-size: 13px; display: none;">
-          No participants match your query.
+        <div id="roster-empty" style="text-align: center; padding: 48px 20px; font-family: var(--font-pixel); color: #fbcfe8; font-size: 12px; display: none;">
+          NO PARTICIPANTS MATCH YOUR QUERY.
         </div>
       </div>
     </div>
@@ -1072,6 +1441,7 @@ def operator_desk() -> str:
   const canvasEl = document.getElementById('snapshot-canvas');
   const camPlaceholder = document.getElementById('cam-placeholder');
   let allPlayers = [];
+  let highlightedPid = null;
 
   async function initCamera() {
     try {
@@ -1137,10 +1507,20 @@ def operator_desk() -> str:
           warnCard.style.display = 'block';
         }
 
+        // Keep all participants visible; highlight and scroll to the existing row
         const searchInput = document.getElementById('roster-search');
-        if (searchInput) {
-          searchInput.value = errData.existing_player_id || roll_no || '';
-          filterRoster();
+        if (searchInput && searchInput.value) {
+          searchInput.value = '';
+        }
+        highlightedPid = errData.existing_player_id || null;
+        filterRoster();
+        if (highlightedPid) {
+          const rowEl = document.getElementById('row-' + highlightedPid);
+          if (rowEl) rowEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setTimeout(() => {
+            highlightedPid = null;
+            filterRoster();
+          }, 4000);
         }
         return;
       }
@@ -1208,13 +1588,14 @@ def operator_desk() -> str:
         : `<div class="thumb-placeholder">👤</div>`;
       const rollHtml = p.roll_no
         ? `<span class="roll-badge">${p.roll_no}</span>`
-        : `<span style="color: var(--text-muted);">-</span>`;
-      const heightHtml = p.height_cm ? `${p.height_cm} cm` : `<span style="color: var(--text-muted);">-</span>`;
+        : `<span style="color: #c084fc;">-</span>`;
+      const heightHtml = p.height_cm ? `<span class="height-cell">${p.height_cm} cm</span>` : `<span style="color: #c084fc;">-</span>`;
+      const hlClass = (highlightedPid && p.player_id === highlightedPid) ? 'row-highlight' : '';
 
-      return `<tr>
+      return `<tr id="row-${p.player_id}" class="${hlClass}">
         <td>${photoHtml}</td>
         <td><span class="pid-badge">${p.player_id}</span></td>
-        <td style="font-weight: 600;">${p.name}</td>
+        <td style="font-weight: 700; color: #fff;">${p.name}</td>
         <td>${rollHtml}</td>
         <td>${heightHtml}</td>
       </tr>`;
@@ -1229,14 +1610,14 @@ def operator_desk() -> str:
   const divider = document.getElementById('drag-divider');
   const leftPanel = document.getElementById('left-panel');
   const mainContainer = document.querySelector('main');
-  const DEFAULT_WIDTH = 420;
-  const MIN_PANEL_WIDTH = 280;
+  const DEFAULT_WIDTH = 440;
+  const MIN_PANEL_WIDTH = 300;
   const STORAGE_KEY = 'dodge_register_split_width';
 
   function setLeftWidth(widthPx) {
     if (!mainContainer || !leftPanel) return;
     const mainRect = mainContainer.getBoundingClientRect();
-    const maxAllowed = mainRect.width - MIN_PANEL_WIDTH - 24;
+    const maxAllowed = mainRect.width - MIN_PANEL_WIDTH - 28;
     const clamped = Math.max(MIN_PANEL_WIDTH, Math.min(widthPx, maxAllowed));
     leftPanel.style.width = clamped + 'px';
     try {
@@ -1285,7 +1666,6 @@ def operator_desk() -> str:
   divider.addEventListener('pointercancel', stopDragging);
   window.addEventListener('pointerup', stopDragging);
 
-  // Double-click to reset to default
   divider.addEventListener('dblclick', () => {
     setLeftWidth(DEFAULT_WIDTH);
   });

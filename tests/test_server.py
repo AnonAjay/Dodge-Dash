@@ -154,9 +154,10 @@ def test_big_screen_display_offline(client):
     assert "REGISTRATION PANEL" in html
     assert "LEADERBOARD" in html
     assert "LIVE RESULTS" in html
-    assert "#ef4444" in html
+    assert "#58c038" in html
+    assert "/static/bg-sunset.png" in html
     assert "/register" in html
-    assert "leaderboard-container" in html
+    assert "pixel-panel" in html or "leaderboard-container" in html
     # D logo box, old status, badges, showcase box, and footer should be removed
     assert "brand-logo" not in html
     assert "Live Festival Network" not in html
@@ -183,7 +184,7 @@ def test_operator_desk_offline(client):
     assert "Registered Participants" in html
     assert "Snap &amp; Register Player" in html or "Snap & Register Player" in html
     assert "aspect-ratio: 4 / 3" in html or "aspect-ratio: 4/3" in html
-    assert "max-height: 46vh" in html
+    assert "max-height: 44vh" in html
     assert "navigator.mediaDevices.getUserMedia" in html
     # Check interactive drag-to-resize divider elements & features
     assert "drag-divider" in html
