@@ -19,6 +19,7 @@ import math
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -34,6 +35,7 @@ from pose_core.skeleton import (
     SkeletonBuilder,
 )
 from shared.contracts import PoseFrame
+from tools.drop_box_test import draw_debug
 
 # Plausible 33-point standing human template (~1.66 m tall, hip-centered, y-down)
 SYNTHETIC_WORLD_LANDMARKS: list[tuple[float, float, float, float]] = [
@@ -440,16 +442,310 @@ def render_scene(
     return img
 
 
+def is_foot_out(pt: tuple[float, float], w_m: float, h_m: float, margin_m: float = 0.0) -> bool:
+    """Check if foot point is outside or on the boundary margin."""
+    x, y = pt
+    return (x <= margin_m) or (x >= w_m - margin_m) or (y <= margin_m) or (y >= h_m - margin_m)
+
+
+def extract_foot_points(pf: PoseFrame | None, kb_pos: tuple[float, float] | None = None) -> list[tuple[float, float]]:
+    """Extract foot points from PoseFrame or keyboard position."""
+    if kb_pos is not None:
+        return [kb_pos]
+    if pf is None:
+        return []
+    if pf.left_foot_m is not None and pf.right_foot_m is not None:
+        return [pf.left_foot_m, pf.right_foot_m]
+    elif pf.left_foot_m is not None:
+        return [pf.left_foot_m]
+    elif pf.right_foot_m is not None:
+        return [pf.right_foot_m]
+    elif pf.floor_x_m is not None and pf.floor_y_m is not None:
+        return [(pf.floor_x_m, pf.floor_y_m)]
+    return []
+
+
+@dataclass
+class ViewerState:
+    game: dbt.DropBoxGame
+    cam: OrbitCamera
+    builder: SkeletonBuilder
+    w_m: float
+    h_m: float
+    edge_margin: float = 0.0
+    out_hold: float = 0.2
+    arm_s: float = 1.0
+    grid_m: float = 0.25
+    mapper: FloorMapper | None = None
+    keyboard: bool = False
+
+    # Dynamic state
+    armed: bool = False
+    arm_timer: float = 0.0
+    out_timer: float = 0.0
+    game_over: bool = False
+    offending_point: tuple[float, float] | None = None
+    last_canvas: np.ndarray | None = None
+    frozen_skel: Skeleton3D | None = None
+    frozen_cam_view: np.ndarray | None = None
+    last_pf: PoseFrame | None = None
+
+    # Keyboard navigation state
+    kb_x: float = 0.6225
+    kb_y: float = 0.6225
+    jump_start_t: float = 0.0
+    jump_duration: float = 0.5
+    pose_fps: float = 60.0
+
+    def reset(self) -> None:
+        """Reset game and viewer state back to disarmed."""
+        self.game.reset()
+        self.armed = False
+        self.arm_timer = 0.0
+        self.out_timer = 0.0
+        self.game_over = False
+        self.offending_point = None
+        self.last_canvas = None
+        self.frozen_skel = None
+        self.frozen_cam_view = None
+        self.last_pf = None
+
+
+def frame_step(state: ViewerState, source: Any | None, dt: float, now: float | None = None) -> np.ndarray:
+    """Execute a single frame step of game update, out-of-box checking, and scene rendering."""
+    if now is None:
+        now = time.monotonic()
+
+    # If already in GAME OVER, freeze scene: keep rendering the last frame without updating
+    if state.game_over:
+        canvas = render_scene(
+            state.frozen_skel,
+            state.game,
+            state.cam,
+            size=(800, 800),
+            w_m=state.w_m,
+            h_m=state.h_m,
+            grid_m=state.grid_m,
+        )
+        if state.frozen_cam_view is not None:
+            preview = state.frozen_cam_view.copy()
+            if state.mapper is not None:
+                preview = dbt.draw_debug(preview, state.mapper, state.last_pf or PoseFrame(), {}, False)
+            thumb_w, thumb_h = 200, 150
+            thumb = cv2.resize(preview, (thumb_w, thumb_h))
+            canvas[10:10 + thumb_h, canvas.shape[1] - 10 - thumb_w:canvas.shape[1] - 10] = thumb
+            cv2.rectangle(
+                canvas, (canvas.shape[1] - 10 - thumb_w, 10), (canvas.shape[1] - 10, 10 + thumb_h),
+                (180, 180, 180), 1
+            )
+        if state.offending_point is not None:
+            ox, oy = state.offending_point
+            proj_off = project([(ox, oy, 0.0)], state.cam, (canvas.shape[1], canvas.shape[0]))[0]
+            if not np.isnan(proj_off).any():
+                cv2.circle(canvas, (int(proj_off[0]), int(proj_off[1])), 8, (0, 0, 255), -1, cv2.LINE_AA)
+                cv2.circle(canvas, (int(proj_off[0]), int(proj_off[1])), 12, (255, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(canvas, "OUT", (int(proj_off[0]) + 12, int(proj_off[1]) + 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2, cv2.LINE_AA)
+
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (80, 260), (720, 540), (14, 14, 18), -1)
+        cv2.addWeighted(overlay, 0.85, canvas, 0.15, 0, canvas)
+        cv2.rectangle(canvas, (80, 260), (720, 540), (0, 0, 255), 3)
+
+        cv2.putText(canvas, "GAME OVER", (canvas.shape[1] // 2 - 165, 330),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4, cv2.LINE_AA)
+        final_txt = f"Score: {state.game.score}   Dodges: {state.game.dodges}   Hits: {state.game.hits}"
+        cv2.putText(canvas, final_txt, (canvas.shape[1] // 2 - 215, 395),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2, cv2.LINE_AA)
+        reason_txt = "Player stepped out of the box!"
+        cv2.putText(canvas, reason_txt, (canvas.shape[1] // 2 - 160, 440),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 165, 255), 2, cv2.LINE_AA)
+        restart_txt = "Press R to restart, Q to quit"
+        cv2.putText(canvas, restart_txt, (canvas.shape[1] // 2 - 165, 490),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2, cv2.LINE_AA)
+
+        key_help = "J/L: yaw | I/K: pitch | U/O: zoom | 1: default 2: side 3: top | R: restart | Q: quit"
+        cv2.putText(canvas, key_help, (15, canvas.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
+        state.last_canvas = canvas
+        return canvas
+
+    # Active frame
+    cam_view = None
+    debug = {}
+    pose_fps = state.pose_fps
+
+    if state.keyboard:
+        in_jump = (now - state.jump_start_t) < state.jump_duration
+        if in_jump:
+            tau = (now - state.jump_start_t) / state.jump_duration
+            arc = 4.0 * tau * (1.0 - tau)
+            hip_lift = 0.8 * arc
+        else:
+            hip_lift = 0.0
+
+        skel = state.builder.build(
+            SYNTHETIC_WORLD_LANDMARKS,
+            floor_pos=(state.kb_x, state.kb_y),
+            hip_lift=hip_lift,
+            ts=now,
+            is_jumping=in_jump,
+        )
+        pf = PoseFrame(
+            timestamp=now,
+            tracked=True,
+            floor_x_m=state.kb_x,
+            floor_y_m=state.kb_y,
+            airborne=in_jump,
+        )
+        feet = extract_foot_points(pf, kb_pos=(state.kb_x, state.kb_y))
+        pose_fps = 60.0
+    else:
+        if source is not None and getattr(source, "error", None):
+            sys.exit(f"Tracking error: {source.error}")
+        if source is not None:
+            pf, skel, frame, debug = source.snapshot3d()
+            cam_view = frame
+            pose_fps = getattr(source, "pose_fps", 0.0)
+            feet = extract_foot_points(pf)
+        else:
+            pf = PoseFrame()
+            skel = None
+            feet = []
+
+    state.last_pf = pf
+
+    # Out condition check
+    any_out = any(is_foot_out(pt, state.w_m, state.h_m, state.edge_margin) for pt in feet) if feet else False
+    offending = next((pt for pt in feet if is_foot_out(pt, state.w_m, state.h_m, state.edge_margin)), None)
+
+    all_inside = (len(feet) > 0) and not any_out
+    if not state.armed:
+        if pf.tracked and not pf.airborne and all_inside:
+            state.arm_timer += dt
+            if state.arm_timer >= state.arm_s:
+                state.armed = True
+        else:
+            state.arm_timer = 0.0
+        pl_in_box = False
+    else:
+        pl_in_box = pf.tracked
+        if pf.tracked and not pf.airborne:
+            if any_out:
+                state.out_timer += dt
+                if state.out_timer >= state.out_hold:
+                    state.game_over = True
+                    state.offending_point = offending
+                    state.frozen_skel = skel
+                    state.frozen_cam_view = cam_view
+            else:
+                state.out_timer = 0.0
+        else:
+            pass
+
+    # Update game if not game_over
+    if not state.game_over:
+        px = pf.floor_x_m if (pf.floor_x_m is not None) else (state.w_m / 2.0)
+        py = pf.floor_y_m if (pf.floor_y_m is not None) else (state.h_m / 2.0)
+        pl = dbt.Player(
+            tracked=bool(pf.tracked),
+            in_box=pl_in_box,
+            x=float(px),
+            y=float(py),
+            airborne=bool(pf.airborne),
+        )
+        state.game.update(dt, pl)
+
+    # Render scene
+    render_skel = state.frozen_skel if state.game_over else skel
+    canvas = render_scene(
+        render_skel,
+        state.game,
+        state.cam,
+        size=(800, 800),
+        w_m=state.w_m,
+        h_m=state.h_m,
+        grid_m=state.grid_m,
+    )
+
+    # Camera preview with floor box and foot points drawn
+    render_cam_view = state.frozen_cam_view if state.game_over else cam_view
+    if render_cam_view is not None:
+        preview = render_cam_view.copy()
+        if state.mapper is not None:
+            preview = dbt.draw_debug(preview, state.mapper, pf, debug, pl_in_box)
+        thumb_w, thumb_h = 200, 150
+        thumb = cv2.resize(preview, (thumb_w, thumb_h))
+        canvas[10:10 + thumb_h, canvas.shape[1] - 10 - thumb_w:canvas.shape[1] - 10] = thumb
+        cv2.rectangle(
+            canvas, (canvas.shape[1] - 10 - thumb_w, 10), (canvas.shape[1] - 10, 10 + thumb_h),
+            (180, 180, 180), 1
+        )
+
+    # HUD text
+    score_txt = f"Score: {state.game.score}   Dodges: {state.game.dodges}   Hits: {state.game.hits}   Pose: {pose_fps:.0f} FPS"
+    cv2.putText(canvas, score_txt, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+
+    up_str = str(state.builder.up_sign) if state.builder.up_sign is not None else "evaluating"
+    jump_h = render_skel.jump_height_m if render_skel is not None else 0.0
+    axis_txt = f"up_sign: {up_str} | pitch: {CAMERA_PITCH_DEG:.1f} deg | jump_z: {jump_h:.2f} m"
+    cv2.putText(canvas, axis_txt, (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 255), 1)
+
+    # Disarmed notification
+    if not state.armed and not state.game_over:
+        cv2.putText(
+            canvas, "STAND INSIDE THE BOX TO START",
+            (canvas.shape[1] // 2 - 240, canvas.shape[0] // 2),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2, cv2.LINE_AA,
+        )
+
+    # If game over triggered in this frame, draw overlay
+    if state.game_over:
+        if state.offending_point is not None:
+            ox, oy = state.offending_point
+            proj_off = project([(ox, oy, 0.0)], state.cam, (canvas.shape[1], canvas.shape[0]))[0]
+            if not np.isnan(proj_off).any():
+                cv2.circle(canvas, (int(proj_off[0]), int(proj_off[1])), 8, (0, 0, 255), -1, cv2.LINE_AA)
+                cv2.circle(canvas, (int(proj_off[0]), int(proj_off[1])), 12, (255, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(canvas, "OUT", (int(proj_off[0]) + 12, int(proj_off[1]) + 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2, cv2.LINE_AA)
+
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (80, 260), (720, 540), (14, 14, 18), -1)
+        cv2.addWeighted(overlay, 0.85, canvas, 0.15, 0, canvas)
+        cv2.rectangle(canvas, (80, 260), (720, 540), (0, 0, 255), 3)
+
+        cv2.putText(canvas, "GAME OVER", (canvas.shape[1] // 2 - 165, 330),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4, cv2.LINE_AA)
+        final_txt = f"Score: {state.game.score}   Dodges: {state.game.dodges}   Hits: {state.game.hits}"
+        cv2.putText(canvas, final_txt, (canvas.shape[1] // 2 - 215, 395),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2, cv2.LINE_AA)
+        reason_txt = "Player stepped out of the box!"
+        cv2.putText(canvas, reason_txt, (canvas.shape[1] // 2 - 160, 440),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 165, 255), 2, cv2.LINE_AA)
+        restart_txt = "Press R to restart, Q to quit"
+        cv2.putText(canvas, restart_txt, (canvas.shape[1] // 2 - 165, 490),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2, cv2.LINE_AA)
+
+    key_help = "J/L: yaw | I/K: pitch | U/O: zoom | 1: default 2: side 3: top | R: restart | Q: quit"
+    cv2.putText(canvas, key_help, (15, canvas.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
+
+    state.last_canvas = canvas
+    return canvas
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="3D skeleton viewer & drop box falling test.")
     ap.add_argument("--keyboard", action="store_true", help="no camera, WASD + SPACE")
-    ap.add_argument("--camera", type=int, default=0)
+    ap.add_argument("--camera", type=int, default=0, help="camera device index (default: 0)")
     ap.add_argument("--floor-w", type=float, default=1.245, help="taped box width (m)")
     ap.add_argument("--floor-h", type=float, default=1.245, help="taped box depth (m)")
     ap.add_argument("--grid", type=float, default=0.25, help="grid spacing (m)")
     ap.add_argument("--fall-s", type=float, default=1.5, help="fall warning duration (s)")
     ap.add_argument("--spawn-s", type=float, default=2.0, help="seconds between hazards")
     ap.add_argument("--view-fov", type=float, default=45.0, help="virtual camera lens field of view (deg)")
+    ap.add_argument("--edge-margin", type=float, default=0.0, help="edge margin in metres for out-of-box (default: 0.0)")
+    ap.add_argument("--out-hold", type=float, default=0.2, help="seconds out of box before game over (default: 0.2)")
+    ap.add_argument("--arm-s", type=float, default=1.0, help="seconds inside box to arm the game (default: 1.0)")
     args = ap.parse_args()
 
     # Configure drop_box_test module attributes before instantiating DropBoxGame
@@ -458,24 +754,22 @@ def main() -> None:
     dbt.IMPACT_S = 0.3
 
     w_m, h_m = args.floor_w, args.floor_h
-    game = dbt.DropBoxGame(w_m, h_m)
-    cam = OrbitCamera.default(w_m, h_m, fov_deg=args.view_fov)
-
     source = mapper = None
-    builder = SkeletonBuilder(camera_pitch_deg=CAMERA_PITCH_DEG)
 
     if not args.keyboard:
         mapper = FloorMapper.load()
         if mapper is None:
-            sys.exit("No calibration found. Run: python -m tools.calibrate_floor")
+            sys.exit("Run: python -m tools.calibrate_floor --floor-w 1.245 --floor-h 1.245")
+        if not Path("models/pose_landmarker_lite.task").exists():
+            sys.exit("Run: python -m tools.get_models")
         w_m, h_m = mapper.w_m, mapper.h_m
-        game = dbt.DropBoxGame(w_m, h_m)
-        cam = OrbitCamera.default(w_m, h_m, fov_deg=args.view_fov)
 
         try:
             source = CameraPoseSource(args.camera, mapper=mapper)
             source.start()
-        except (RuntimeError, FileNotFoundError) as e:
+        except FileNotFoundError:
+            sys.exit("Run: python -m tools.get_models")
+        except RuntimeError as e:
             sys.exit(str(e))
         atexit.register(source.stop)
 
@@ -485,122 +779,86 @@ def main() -> None:
                 sys.exit("No frames from the camera.")
             time.sleep(0.05)
 
-    kb_x, kb_y = w_m / 2.0, h_m / 2.0
-    jump_start_t = 0.0
-    jump_duration = 0.5
+    game = dbt.DropBoxGame(w_m, h_m)
+    cam = OrbitCamera.default(w_m, h_m, fov_deg=args.view_fov)
+    builder = SkeletonBuilder(camera_pitch_deg=CAMERA_PITCH_DEG)
+
+    state = ViewerState(
+        game=game,
+        cam=cam,
+        builder=builder,
+        w_m=w_m,
+        h_m=h_m,
+        edge_margin=args.edge_margin,
+        out_hold=args.out_hold,
+        arm_s=args.arm_s,
+        grid_m=args.grid,
+        mapper=mapper,
+        keyboard=args.keyboard,
+        kb_x=w_m / 2.0,
+        kb_y=h_m / 2.0,
+    )
 
     last_t = time.monotonic()
-    pose_fps = 0.0
 
     print("Controls:")
     print("  J / L: rotate yaw left/right")
     print("  I / K: tilt pitch up/down")
     print("  U / O: zoom in/out")
     print("  1: default view | 2: side view | 3: top-down view")
-    print("  WASD + SPACE (keyboard mode) | Q: quit")
+    print("  R: restart | Q: quit")
+    print("  WASD + SPACE (keyboard mode)")
 
-    while True:
-        now = time.monotonic()
-        dt = min(now - last_t, 0.1)
-        last_t = now
+    try:
+        while True:
+            now = time.monotonic()
+            dt = min(now - last_t, 0.1)
+            last_t = now
 
-        cam_view = None
-        jump_h = 0.0
+            canvas = frame_step(state, source, dt, now=now)
 
-        if args.keyboard:
-            in_jump = (now - jump_start_t) < jump_duration
-            if in_jump:
-                tau = (now - jump_start_t) / jump_duration
-                # Parabolic jump arc: 4 * tau * (1 - tau) peak = 1.0 at tau=0.5
-                arc = 4.0 * tau * (1.0 - tau)
-                hip_lift = 0.8 * arc
-            else:
-                hip_lift = 0.0
+            cv2.imshow("3D Skeleton & Falling Boxes", canvas)
+            k = cv2.waitKey(20) & 0xFF
 
-            skel = builder.build(
-                SYNTHETIC_WORLD_LANDMARKS,
-                floor_pos=(kb_x, kb_y),
-                hip_lift=hip_lift,
-                ts=now,
-                is_jumping=in_jump,
-            )
-            jump_h = skel.jump_height_m
-            pl = dbt.Player(True, mapper.inside(kb_x, kb_y) if mapper else True, kb_x, kb_y, in_jump)
-            pose_fps = 60.0
-        else:
-            if source.error:
-                sys.exit("Tracking error: " + source.error)
-            pf, skel, frame, debug = source.snapshot3d()
-            pl = dbt.player_from(pf, mapper)
-            cam_view = frame
-            pose_fps = source.pose_fps
-            if skel is not None:
-                jump_h = skel.jump_height_m
+            if k == ord("q"):
+                break
+            elif k in (ord("r"), ord("R")):
+                state.reset()
+            elif k == ord("1"):
+                state.cam = OrbitCamera.default(state.w_m, state.h_m, fov_deg=state.cam.fov_deg)
+            elif k == ord("2"):
+                state.cam = OrbitCamera.side(state.w_m, state.h_m, fov_deg=state.cam.fov_deg)
+            elif k == ord("3"):
+                state.cam = OrbitCamera.top_down(state.w_m, state.h_m, fov_deg=state.cam.fov_deg)
+            elif k == ord("j"):
+                state.cam.yaw_deg = (state.cam.yaw_deg + 5.0) % 360.0
+            elif k == ord("l"):
+                state.cam.yaw_deg = (state.cam.yaw_deg - 5.0) % 360.0
+            elif k == ord("i"):
+                state.cam.pitch_deg = min(89.0, state.cam.pitch_deg + 5.0)
+            elif k == ord("k"):
+                state.cam.pitch_deg = max(-89.0, state.cam.pitch_deg - 5.0)
+            elif k == ord("u"):
+                state.cam.distance = max(0.5, state.cam.distance - 0.2)
+            elif k == ord("o"):
+                state.cam.distance = min(10.0, state.cam.distance + 0.2)
 
-        game.update(dt, pl)
-        canvas = render_scene(skel, game, cam, size=(800, 800), w_m=w_m, h_m=h_m, grid_m=args.grid)
-
-        # Inset camera preview in top-right corner if available
-        if cam_view is not None:
-            thumb_w, thumb_h = 200, 150
-            thumb = cv2.resize(cam_view, (thumb_w, thumb_h))
-            canvas[10:10 + thumb_h, canvas.shape[1] - 10 - thumb_w:canvas.shape[1] - 10] = thumb
-            cv2.rectangle(
-                canvas, (canvas.shape[1] - 10 - thumb_w, 10), (canvas.shape[1] - 10, 10 + thumb_h),
-                (180, 180, 180), 1
-            )
-
-        # HUD Text overlays
-        score_txt = f"Score: {game.score}   Dodges: {game.dodges}   Hits: {game.hits}   Pose: {pose_fps:.0f} FPS"
-        cv2.putText(canvas, score_txt, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
-
-        up_str = str(builder.up_sign) if builder.up_sign is not None else "evaluating"
-        axis_txt = f"up_sign: {up_str} | pitch: {CAMERA_PITCH_DEG:.1f} deg | jump_z: {jump_h:.2f} m"
-        cv2.putText(canvas, axis_txt, (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 255), 1)
-
-        key_help = "J/L: yaw | I/K: pitch | U/O: zoom | 1: default 2: side 3: top | Q: quit"
-        cv2.putText(canvas, key_help, (15, canvas.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
-
-        cv2.imshow("3D Skeleton & Falling Boxes", canvas)
-        k = cv2.waitKey(20) & 0xFF
-
-        if k == ord("q"):
-            break
-        elif k == ord("1"):
-            cam = OrbitCamera.default(w_m, h_m, fov_deg=cam.fov_deg)
-        elif k == ord("2"):
-            cam = OrbitCamera.side(w_m, h_m, fov_deg=cam.fov_deg)
-        elif k == ord("3"):
-            cam = OrbitCamera.top_down(w_m, h_m, fov_deg=cam.fov_deg)
-        elif k == ord("j"):
-            cam.yaw_deg = (cam.yaw_deg + 5.0) % 360.0
-        elif k == ord("l"):
-            cam.yaw_deg = (cam.yaw_deg - 5.0) % 360.0
-        elif k == ord("i"):
-            cam.pitch_deg = min(89.0, cam.pitch_deg + 5.0)
-        elif k == ord("k"):
-            cam.pitch_deg = max(-89.0, cam.pitch_deg - 5.0)
-        elif k == ord("u"):
-            cam.distance = max(0.5, cam.distance - 0.2)
-        elif k == ord("o"):
-            cam.distance = min(10.0, cam.distance + 0.2)
-
-        if args.keyboard:
-            step = 0.06
-            if k == ord("a"):
-                kb_x = max(-0.1, kb_x - step)
-            if k == ord("d"):
-                kb_x = min(w_m + 0.1, kb_x + step)
-            if k == ord("w"):
-                kb_y = min(h_m + 0.1, kb_y + step)
-            if k == ord("s"):
-                kb_y = max(-0.1, kb_y - step)
-            if k == ord(" "):
-                jump_start_t = time.monotonic()
-
-    if source is not None:
-        source.stop()
-    cv2.destroyAllWindows()
+            if state.keyboard and not state.game_over:
+                step = 0.06
+                if k == ord("a"):
+                    state.kb_x = max(-0.1, state.kb_x - step)
+                if k == ord("d"):
+                    state.kb_x = min(state.w_m + 0.1, state.kb_x + step)
+                if k == ord("w"):
+                    state.kb_y = min(state.h_m + 0.1, state.kb_y + step)
+                if k == ord("s"):
+                    state.kb_y = max(-0.1, state.kb_y - step)
+                if k == ord(" "):
+                    state.jump_start_t = time.monotonic()
+    finally:
+        if source is not None:
+            source.stop()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
