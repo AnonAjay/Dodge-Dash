@@ -3,15 +3,14 @@
 Measures how reliably floor tracking reports which floor tile the player's feet
 are on, so tile dimensions can be chosen based on empirical data.
 
-Orientation convention:
+Orientation convention (confirmed for 3x3 game engine):
   - (0, 0) = near-left corner of the floor box
-  - x grows to the right -> col 0 is leftmost, col (cols - 1) is rightmost
+  - x grows to the right -> col 0 is leftmost (bottom-left), col (cols - 1) is rightmost
   - y grows AWAY from the camera -> row 0 is NEAREST the camera, row (rows - 1) is farthest
   - Points outside [0, w] x [0, h] return None.
-  NOTE: This orientation assumption should be confirmed with the team lead.
 
 Run from repo root:
-    python -m tools.tile_check [--cols 4] [--rows 4] [--camera N]
+    python -m tools.tile_check [--cols 3] [--rows 3] [--camera N]
                                [--targets quick|corners|all] [--note "text"]
 """
 from __future__ import annotations
@@ -57,7 +56,7 @@ def tile_of(
       - Points outside [0, w] x [0, h] return None.
       - Points on outer boundaries: x == w returns cols - 1, y == h returns rows - 1.
 
-    NOTE: This orientation assumption should be confirmed with the team lead.
+    Orientation convention (confirmed for 3x3 game engine): row 0 nearest camera, col 0 bottom-left.
     """
     if x < 0.0 or x > w or y < 0.0 or y > h:
         return None
@@ -663,8 +662,8 @@ class TileCheckStateMachine:
         self,
         w_m: float,
         h_m: float,
-        cols: int = 4,
-        rows: int = 4,
+        cols: int = 3,
+        rows: int = 3,
         targets_mode: str = "quick",
         note: str = "",
         recordings_dir: Path | str = "recordings",
@@ -922,8 +921,8 @@ class TileCheckStateMachine:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Tile accuracy check for Floor-is-Lava.")
-    ap.add_argument("--cols", type=int, default=4, help="initial grid columns (default: 4)")
-    ap.add_argument("--rows", type=int, default=4, help="initial grid rows (default: 4)")
+    ap.add_argument("--cols", type=int, default=3, help="initial grid columns (default: 3)")
+    ap.add_argument("--rows", type=int, default=3, help="initial grid rows (default: 3)")
     ap.add_argument("--camera", type=int, default=0, help="camera device index (default: 0)")
     ap.add_argument("--targets", choices=["quick", "corners", "all"], default="quick",
                     help="accuracy test targets (default: quick)")
