@@ -16,3 +16,4 @@ recordings/
 .pytest_cache/
 .pytest_tmp/
 learning.md
+tools/skeleton3d_test.py
