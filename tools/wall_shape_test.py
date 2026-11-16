@@ -329,14 +329,34 @@ def render_stage_view(
     )
 
     # 3. Target Cut-Out Silhouette (Dashed Cyan/Neon Reference Wireframe)
+    # Compute reliable scale in pixels per metre from arena bounds
+    if mapper is not None:
+        pts = mapper.corners_px
+        w_near_px = math.hypot(pts[0][0] - pts[3][0], pts[0][1] - pts[3][1])
+        w_far_px = math.hypot(pts[1][0] - pts[2][0], pts[1][1] - pts[2][1])
+        scale_px_m = (w_near_px + w_far_px) / (2.0 * max(0.1, mapper.w_m))
+    else:
+        scale_px_m = 230.0
+
     ref_pts = make_template_ref_posture(tmpl.id)
     ref_px: list[tuple[int, int]] = []
     w_scale = 1.0 + 0.12 * approach_ratio
-    cx, cy = STAGE_W // 2, int(STAGE_H * 0.44)
+
+    # Center target silhouette above arena center if camera/mapper active, else screen center
+    if mapper is not None and frame is not None:
+        c_px = mapper.to_pixels(mapper.w_m / 2.0, mapper.h_m / 2.0)
+        cx = int(round(c_px[0]))
+        cy = int(round(c_px[1] - 0.42 * scale_px_m))
+        sil_w = scale_px_m * 1.05 * w_scale
+        sil_h = scale_px_m * 1.55 * w_scale
+    else:
+        cx, cy = STAGE_W // 2, int(STAGE_H * 0.44)
+        sil_w = STAGE_W * 0.72 * w_scale
+        sil_h = STAGE_H * 0.68 * w_scale
 
     for rx, ry, _ in ref_pts:
-        px = int(cx + (rx - 0.5) * (STAGE_W * 0.72) * w_scale)
-        py = int(cy + (ry - 0.5) * (STAGE_H * 0.68) * w_scale)
+        px = int(cx + (rx - 0.5) * sil_w)
+        py = int(cy + (ry - 0.5) * sil_h)
         ref_px.append((px, py))
 
     # Draw target cut-out bones (Translucent thick silhouette)
