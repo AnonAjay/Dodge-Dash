@@ -89,39 +89,45 @@ class OrbitCamera:
     distance: float
     yaw_deg: float
     pitch_deg: float
-    fov_deg: float = 60.0
+    fov_deg: float = 45.0
 
     @classmethod
-    def default(cls, w_m: float = 1.245, h_m: float = 1.245) -> OrbitCamera:
-        """Default: behind the near edge of the box, ~1.6 m high, looking at box centre."""
+    def default(cls, w_m: float = 1.245, h_m: float = 1.245, fov_deg: float = 45.0) -> OrbitCamera:
+        """Default: near side, centered on x=w/2, elevated, pitched down ~30 deg, looking at (w/2, h/2, 0.5)."""
+        target = (w_m / 2.0, h_m / 2.0, 0.5)
+        dist = auto_frame_distance(w_m, h_m, yaw_deg=0.0, pitch_deg=30.0, target=target, fov_deg=fov_deg)
         return cls(
-            target=(w_m / 2.0, h_m / 2.0, 0.75),
-            distance=2.0,
+            target=target,
+            distance=dist,
             yaw_deg=0.0,
-            pitch_deg=25.0,
-            fov_deg=60.0,
+            pitch_deg=30.0,
+            fov_deg=fov_deg,
         )
 
     @classmethod
-    def side(cls, w_m: float = 1.245, h_m: float = 1.245) -> OrbitCamera:
+    def side(cls, w_m: float = 1.245, h_m: float = 1.245, fov_deg: float = 45.0) -> OrbitCamera:
         """Side view: looking along x to check the figure stands upright."""
+        target = (w_m / 2.0, h_m / 2.0, 0.75)
+        dist = auto_frame_distance(w_m, h_m, yaw_deg=-90.0, pitch_deg=0.0, target=target, fov_deg=fov_deg)
         return cls(
-            target=(w_m / 2.0, h_m / 2.0, 0.75),
-            distance=2.2,
+            target=target,
+            distance=dist,
             yaw_deg=-90.0,
             pitch_deg=0.0,
-            fov_deg=60.0,
+            fov_deg=fov_deg,
         )
 
     @classmethod
-    def top_down(cls, w_m: float = 1.245, h_m: float = 1.245) -> OrbitCamera:
+    def top_down(cls, w_m: float = 1.245, h_m: float = 1.245, fov_deg: float = 45.0) -> OrbitCamera:
         """Top-down view: looking straight down from above the box."""
+        target = (w_m / 2.0, h_m / 2.0, 0.0)
+        dist = auto_frame_distance(w_m, h_m, yaw_deg=0.0, pitch_deg=89.0, target=target, fov_deg=fov_deg)
         return cls(
-            target=(w_m / 2.0, h_m / 2.0, 0.0),
-            distance=2.4,
+            target=target,
+            distance=dist,
             yaw_deg=0.0,
             pitch_deg=89.0,
-            fov_deg=60.0,
+            fov_deg=fov_deg,
         )
 
 
@@ -171,6 +177,67 @@ def project(points_xyz: Any, cam: OrbitCamera, size: tuple[int, int] = (800, 800
     return out
 
 
+def auto_frame_distance(
+    w_m: float,
+    h_m: float,
+    yaw_deg: float,
+    pitch_deg: float,
+    target: tuple[float, float, float],
+    fov_deg: float = 45.0,
+    size: tuple[int, int] = (800, 800),
+    target_span: float = 0.60,
+    figure_height_m: float = 1.9,
+    margin_px: float = 10.0,
+) -> float:
+    """Choose camera distance so floor rectangle spans ~60% width and 1.9m figure is fully visible."""
+    W, H = size
+    cx, cy = w_m / 2.0, h_m / 2.0
+    floor_corners = [
+        (0.0, 0.0, 0.0),
+        (w_m, 0.0, 0.0),
+        (w_m, h_m, 0.0),
+        (0.0, h_m, 0.0),
+    ]
+    # Points defining a 1.9 m tall figure standing at box centre
+    fig_pts = [(cx, cy, z) for z in np.linspace(0.0, figure_height_m, 11)]
+    fig_pts.extend([
+        (cx - 0.25, cy, figure_height_m * 0.8),
+        (cx + 0.25, cy, figure_height_m * 0.8),
+        (cx, cy - 0.2, figure_height_m * 0.8),
+        (cx, cy + 0.2, figure_height_m * 0.8),
+    ])
+
+    best_r = 3.5
+    best_diff = float("inf")
+
+    # Numeric loop: search distances from 0.5m to 15.0m
+    for r in np.arange(0.5, 15.0, 0.02):
+        cam = OrbitCamera(target=target, distance=float(r), yaw_deg=yaw_deg, pitch_deg=pitch_deg, fov_deg=fov_deg)
+        pts_fig = project(fig_pts, cam, size)
+        if np.isnan(pts_fig).any():
+            continue
+        u_f, v_f = pts_fig[:, 0], pts_fig[:, 1]
+        fig_ok = bool(
+            (u_f >= margin_px).all() and (u_f <= W - margin_px).all() and
+            (v_f >= margin_px).all() and (v_f <= H - margin_px).all()
+        )
+        if not fig_ok:
+            continue
+
+        pts_floor = project(floor_corners, cam, size)
+        if np.isnan(pts_floor).any():
+            continue
+        span_w = (np.max(pts_floor[:, 0]) - np.min(pts_floor[:, 0])) / W
+        span_h = (np.max(pts_floor[:, 1]) - np.min(pts_floor[:, 1])) / H
+        span = max(span_w, span_h) if pitch_deg > 70.0 else span_w
+        diff = abs(span - target_span)
+        if diff < best_diff:
+            best_diff = diff
+            best_r = float(r)
+
+    return round(float(best_r), 2)
+
+
 def render_scene(
     skeleton: Skeleton3D | None,
     game: Any | None,
@@ -213,6 +280,48 @@ def render_scene(
     proj_corners = project(corners, cam, size)
     for i in range(4):
         draw_seg(proj_corners[i], proj_corners[(i + 1) % 4], (255, 230, 0), 2)
+
+    # Scale indicators & reference marks
+    # Metric tick marks and labels every 0.5 m along near edge (y=0) and left edge (x=0)
+    x_tick = 0.5
+    while x_tick <= w_m + 1e-5:
+        p_base = project([(x_tick, 0.0, 0.0)], cam, size)[0]
+        p_ext = project([(x_tick, -0.04, 0.0)], cam, size)[0]
+        draw_seg(p_base, p_ext, (180, 180, 180), 1)
+        if not np.isnan(p_ext).any():
+            cv2.putText(
+                img, f"{x_tick:.1f}m", (int(p_ext[0]) - 14, int(p_ext[1]) + 15),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (180, 180, 180), 1, cv2.LINE_AA,
+            )
+        x_tick += 0.5
+
+    y_tick = 0.5
+    while y_tick <= h_m + 1e-5:
+        p_base = project([(0.0, y_tick, 0.0)], cam, size)[0]
+        p_ext = project([(-0.04, y_tick, 0.0)], cam, size)[0]
+        draw_seg(p_base, p_ext, (180, 180, 180), 1)
+        if not np.isnan(p_ext).any():
+            cv2.putText(
+                img, f"{y_tick:.1f}m", (int(p_ext[0]) - 38, int(p_ext[1]) + 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (180, 180, 180), 1, cv2.LINE_AA,
+            )
+        y_tick += 0.5
+
+    # Scale reference: thin vertical line 1.0 m tall at far-left corner (0, h_m, 0), labelled "1 m"
+    ref_base = project([(0.0, h_m, 0.0)], cam, size)[0]
+    ref_top = project([(0.0, h_m, 1.0)], cam, size)[0]
+    draw_seg(ref_base, ref_top, (220, 220, 220), 1)
+    if not np.isnan(ref_top).any():
+        cv2.putText(
+            img, "1 m", (int(ref_top[0]) - 32, int(ref_top[1]) + 4),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1, cv2.LINE_AA,
+        )
+
+    # Real floor dimension text
+    cv2.putText(
+        img, f"floor {w_m:.3f} x {h_m:.3f} m", (15, H - 35),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1, cv2.LINE_AA,
+    )
 
     # 2. Falling hazards
     if game is not None:
@@ -277,6 +386,13 @@ def render_scene(
         for i, j in BONES:
             draw_seg(proj_shadow[i], proj_shadow[j], (45, 45, 52), 2)
 
+        # Neck shadow on floor
+        p11 = skeleton.points_m[11]
+        p12 = skeleton.points_m[12]
+        neck_base_shadow_3d = ((p11[0] + p12[0]) / 2.0, (p11[1] + p12[1]) / 2.0, 0.0)
+        proj_neck_base_shadow = project([neck_base_shadow_3d], cam, size)[0]
+        draw_seg(proj_neck_base_shadow, proj_shadow[0], (45, 45, 52), 2)
+
         # 33-point stick figure
         proj_skel = project(skeleton.points_m, cam, size)
 
@@ -294,6 +410,20 @@ def render_scene(
                 color = (70, 90, 110) if is_dim else (0, 230, 255)
 
             draw_seg(proj_skel[i], proj_skel[j], color, thick)
+
+        # Draw neck line (drawing only) from shoulder midpoint (11, 12) to nose (0)
+        neck_base_3d = (
+            (p11[0] + p12[0]) / 2.0,
+            (p11[1] + p12[1]) / 2.0,
+            (p11[2] + p12[2]) / 2.0,
+        )
+        proj_neck_base = project([neck_base_3d], cam, size)[0]
+        v11 = skeleton.visibility[11] if 11 < len(skeleton.visibility) else 1.0
+        v12 = skeleton.visibility[12] if 12 < len(skeleton.visibility) else 1.0
+        v0 = skeleton.visibility[0] if 0 < len(skeleton.visibility) else 1.0
+        neck_dim = (v11 < 0.5 or v12 < 0.5 or v0 < 0.5)
+        neck_color = (70, 110, 70) if neck_dim else (0, 255, 128)
+        draw_seg(proj_neck_base, proj_skel[0], neck_color, 3)
 
         # Head circle around nose/ears
         nose = proj_skel[0]
@@ -319,6 +449,7 @@ def main() -> None:
     ap.add_argument("--grid", type=float, default=0.25, help="grid spacing (m)")
     ap.add_argument("--fall-s", type=float, default=1.5, help="fall warning duration (s)")
     ap.add_argument("--spawn-s", type=float, default=2.0, help="seconds between hazards")
+    ap.add_argument("--view-fov", type=float, default=45.0, help="virtual camera lens field of view (deg)")
     args = ap.parse_args()
 
     # Configure drop_box_test module attributes before instantiating DropBoxGame
@@ -328,7 +459,7 @@ def main() -> None:
 
     w_m, h_m = args.floor_w, args.floor_h
     game = dbt.DropBoxGame(w_m, h_m)
-    cam = OrbitCamera.default(w_m, h_m)
+    cam = OrbitCamera.default(w_m, h_m, fov_deg=args.view_fov)
 
     source = mapper = None
     builder = SkeletonBuilder(camera_pitch_deg=CAMERA_PITCH_DEG)
@@ -339,7 +470,7 @@ def main() -> None:
             sys.exit("No calibration found. Run: python -m tools.calibrate_floor")
         w_m, h_m = mapper.w_m, mapper.h_m
         game = dbt.DropBoxGame(w_m, h_m)
-        cam = OrbitCamera.default(w_m, h_m)
+        cam = OrbitCamera.default(w_m, h_m, fov_deg=args.view_fov)
 
         try:
             source = CameraPoseSource(args.camera, mapper=mapper)
@@ -436,11 +567,11 @@ def main() -> None:
         if k == ord("q"):
             break
         elif k == ord("1"):
-            cam = OrbitCamera.default(w_m, h_m)
+            cam = OrbitCamera.default(w_m, h_m, fov_deg=cam.fov_deg)
         elif k == ord("2"):
-            cam = OrbitCamera.side(w_m, h_m)
+            cam = OrbitCamera.side(w_m, h_m, fov_deg=cam.fov_deg)
         elif k == ord("3"):
-            cam = OrbitCamera.top_down(w_m, h_m)
+            cam = OrbitCamera.top_down(w_m, h_m, fov_deg=cam.fov_deg)
         elif k == ord("j"):
             cam.yaw_deg = (cam.yaw_deg + 5.0) % 360.0
         elif k == ord("l"):
