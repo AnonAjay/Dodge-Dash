@@ -235,6 +235,7 @@ def render_stage_view(
     player_pts: Sequence[Any] | None,
     mapper: FloorMapper | None = None,
     pf: PoseFrame | None = None,
+    debug: dict | None = None,
 ) -> np.ndarray:
     """Render mirrored camera feed, floor grid/standing zone, oncoming cut-out wall, and player skeleton."""
     if frame is not None:
@@ -330,12 +331,12 @@ def render_stage_view(
     # 3. Target Cut-Out Silhouette (Dashed Cyan/Neon Reference Wireframe)
     ref_pts = make_template_ref_posture(tmpl.id)
     ref_px: list[tuple[int, int]] = []
-    w_scale = 1.0 + 0.15 * approach_ratio
-    cx, cy = STAGE_W // 2, STAGE_H // 2 + 10
+    w_scale = 1.0 + 0.12 * approach_ratio
+    cx, cy = STAGE_W // 2, int(STAGE_H * 0.44)
 
     for rx, ry, _ in ref_pts:
-        px = int(cx + (rx - 0.5) * (STAGE_W * 0.85) * w_scale)
-        py = int(cy + (ry - 0.5) * (STAGE_H * 0.82) * w_scale)
+        px = int(cx + (rx - 0.5) * (STAGE_W * 0.72) * w_scale)
+        py = int(cy + (ry - 0.5) * (STAGE_H * 0.68) * w_scale)
         ref_px.append((px, py))
 
     # Draw target cut-out bones (Translucent thick silhouette)
@@ -350,28 +351,53 @@ def render_stage_view(
     # 4. Draw Player Skeleton (Color-coded: Green = within tolerance, Red/Amber = adjust)
     if player_pts and len(player_pts) >= 29:
         player_px: list[tuple[int, int]] = []
-        for lm in player_pts:
-            if hasattr(lm, "x") and hasattr(lm, "y"):
-                px = int(lm.x * STAGE_W)
-                py = int(lm.y * STAGE_H)
-            elif isinstance(lm, (tuple, list)):
-                if len(lm) >= 3 and abs(lm[0]) < 2.5 and abs(lm[1]) < 2.5 and mapper is not None and frame is not None:
-                    # 3D floor coordinates (X: floor x, Y: floor depth, Z: floor height)
-                    gx, gy = mapper.to_pixels(lm[0], lm[1])
-                    p_l = mapper.to_pixels(0.0, lm[1])
-                    p_r = mapper.to_pixels(mapper.w_m, lm[1])
-                    px_per_m = abs(p_r[0] - p_l[0]) / max(0.1, mapper.w_m)
-                    px = int(round(gx))
-                    py = int(round(gy - lm[2] * px_per_m))
-                elif len(lm) >= 3 and abs(lm[0]) < 2.0 and abs(lm[2]) < 2.5:
-                    px = int(cx + (lm[0] - 0.62) * 260)
-                    py = int(STAGE_H - 40 - lm[2] * 230)
-                else:
-                    px = int(cx + (lm[0] - 0.5) * (STAGE_W * 0.85) * w_scale) if lm[0] <= 1.0 else int(lm[0])
-                    py = int(cy + (lm[1] - 0.5) * (STAGE_H * 0.82) * w_scale) if lm[1] <= 1.0 else int(lm[1])
+
+        # Check if 3D metric skeleton points from camera
+        is_3d_skel = False
+        if len(player_pts) > 0 and isinstance(player_pts[0], (tuple, list)) and len(player_pts[0]) >= 3:
+            if abs(player_pts[0][0]) < 2.5 and abs(player_pts[0][1]) < 2.5 and (abs(player_pts[0][2]) > 0.05 or any(abs(p[2]) > 0.1 for p in player_pts)):
+                is_3d_skel = True
+
+        if is_3d_skel:
+            # Determine real anchor pixel on screen
+            foot_anchor = None
+            if debug and debug.get("foot_px"):
+                foot_anchor = (float(debug["foot_px"][0]), float(debug["foot_px"][1]))
+            elif pf and getattr(pf, "floor_x_m", None) is not None and mapper is not None:
+                foot_anchor = mapper.to_pixels(pf.floor_x_m, pf.floor_y_m)
             else:
-                px, py = 0, 0
-            player_px.append((px, py))
+                foot_anchor = (float(cx), float(STAGE_H - 100))
+
+            # Compute reliable scale in pixels per metre from arena bounds
+            if mapper is not None:
+                pts = mapper.corners_px
+                w_near_px = math.hypot(pts[0][0] - pts[3][0], pts[0][1] - pts[3][1])
+                w_far_px = math.hypot(pts[1][0] - pts[2][0], pts[1][1] - pts[2][1])
+                scale_px_m = (w_near_px + w_far_px) / (2.0 * max(0.1, mapper.w_m))
+            else:
+                scale_px_m = 230.0
+
+            # Scale each 3D joint relative to foot anchor
+            fpx = pf.floor_x_m if (pf and getattr(pf, "floor_x_m", None) is not None) else 0.62
+            for lm in player_pts:
+                dx_m = lm[0] - fpx
+                dz_m = lm[2]
+                px = int(round(foot_anchor[0] + dx_m * scale_px_m))
+                py = int(round(foot_anchor[1] - dz_m * scale_px_m))
+                player_px.append((px, py))
+        else:
+            # 2D normalized points (keyboard mode)
+            for lm in player_pts:
+                if hasattr(lm, "x") and hasattr(lm, "y"):
+                    px = int(lm.x * STAGE_W)
+                    py = int(lm.y * STAGE_H)
+                elif isinstance(lm, (tuple, list)):
+                    rx, ry = lm[0], lm[1]
+                    px = int(cx + (rx - 0.5) * (STAGE_W * 0.72) * w_scale)
+                    py = int(cy + (ry - 0.5) * (STAGE_H * 0.68) * w_scale)
+                else:
+                    px, py = 0, 0
+                player_px.append((px, py))
 
         def is_joint_ok(j_idx: int) -> bool:
             """Unconstrained joints (Head, Hips, Wrists, Ankles) default to green unless requested."""
@@ -577,6 +603,7 @@ def step_frame(
     pts_to_evaluate: Sequence[Any] | None = None
     player_pos: tuple[float, float] | None = None
     pf: PoseFrame | None = None
+    debug: dict = {}
 
     if state.keyboard_mode:
         # Generate synthetic posture for keyboard mode
@@ -626,7 +653,7 @@ def step_frame(
     state.update(dt, match_result)
 
     # Render stage and sidebar
-    stage = render_stage_view(cam_frame, state, match_result, pts_to_evaluate, mapper=mapper, pf=pf)
+    stage = render_stage_view(cam_frame, state, match_result, pts_to_evaluate, mapper=mapper, pf=pf, debug=debug)
     sidebar = render_sidebar_panel(state, match_result, fps, pose_fps)
     canvas = np.hstack([stage, sidebar])
 
