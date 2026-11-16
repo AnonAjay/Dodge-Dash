@@ -824,7 +824,7 @@ class TileCheckStateMachine:
             all_errs.extend(t_stat["errors"])
 
         self.summary_stats = compute_summary(self.per_target_stats, all_errs)
-        target_error_lists = [t_stat["errors"] for t in self.per_target_stats]
+        target_error_lists = [t["errors"] for t in self.per_target_stats]
         self.p_table = p_correct_table(target_error_lists, self.w_m, self.h_m, n_range=range(2, 9))
 
         # Print formatted summary to console
