@@ -114,14 +114,17 @@ def extract_pose_angles(landmarks: Sequence[Any]) -> dict[str, float]:
     left_hip = angle_3pts(ls, lh, lk)
     right_hip = angle_3pts(rs, rh, rk)
 
-    # 5. Torso spine inclination (angle of spine vector relative to horizontal)
+    # 5. Torso spine inclination (angle of spine vector relative to vertical)
     # Hip midpoint to shoulder midpoint
-    spine_v = (
-        (ls[0] + rs[0]) / 2.0 - (lh[0] + rh[0]) / 2.0,
-        (ls[1] + rs[1]) / 2.0 - (lh[1] + rh[1]) / 2.0,
-    )
-    # Relative to vertical (0, -1 in image space, or 0, 1 in metric Z)
-    torso_tilt = angle_between_vectors(spine_v, (0.0, -1.0))
+    dx = (ls[0] + rs[0]) / 2.0 - (lh[0] + rh[0]) / 2.0
+    if abs(ls[2]) > 0.05 or abs(lh[2]) > 0.05:
+        # 3D floor coordinates: Z is vertical height (upward is positive)
+        dz = (ls[2] + rs[2]) / 2.0 - (lh[2] + rh[2]) / 2.0
+        torso_tilt = angle_between_vectors((dx, dz), (0.0, 1.0))
+    else:
+        # 2D image coordinates: Y is vertical downwards (upward is negative)
+        dy = (ls[1] + rs[1]) / 2.0 - (lh[1] + rh[1]) / 2.0
+        torso_tilt = angle_between_vectors((dx, dy), (0.0, -1.0))
 
     return {
         "left_elbow": round(left_elbow, 1),
@@ -180,15 +183,18 @@ DEFAULT_TEMPLATES: list[PoseTemplate] = [
     PoseTemplate(
         id="t_pose",
         name="T-Pose",
-        description="Arms straight out horizontally at 90 deg, legs straight",
+        description="Arms straight out horizontally at 95 deg, legs straight",
         expected_angles={
-            "left_shoulder": 90.0,
-            "right_shoulder": 90.0,
-            "left_elbow": 175.0,
-            "right_elbow": 175.0,
-            "left_knee": 175.0,
-            "right_knee": 175.0,
+            "left_shoulder": 95.0,
+            "right_shoulder": 95.0,
+            "left_elbow": 170.0,
+            "right_elbow": 170.0,
+            "left_knee": 165.0,
+            "right_knee": 165.0,
         },
+        target_pos_m=(0.62, 0.62),
+        angle_tolerance_deg=20.0,
+        pos_tolerance_m=0.40,
     ),
     PoseTemplate(
         id="star",
@@ -197,24 +203,30 @@ DEFAULT_TEMPLATES: list[PoseTemplate] = [
         expected_angles={
             "left_shoulder": 135.0,
             "right_shoulder": 135.0,
-            "left_elbow": 175.0,
-            "right_elbow": 175.0,
-            "left_knee": 175.0,
-            "right_knee": 175.0,
+            "left_elbow": 170.0,
+            "right_elbow": 170.0,
+            "left_knee": 165.0,
+            "right_knee": 165.0,
         },
+        target_pos_m=(0.62, 0.62),
+        angle_tolerance_deg=20.0,
+        pos_tolerance_m=0.40,
     ),
     PoseTemplate(
         id="cactus",
         name="Cactus / Goalpost",
-        description="Shoulders horizontal (90 deg), elbows bent up at 90 deg",
+        description="Shoulders horizontal (95 deg), elbows bent up at 90 deg",
         expected_angles={
-            "left_shoulder": 90.0,
-            "right_shoulder": 90.0,
+            "left_shoulder": 95.0,
+            "right_shoulder": 95.0,
             "left_elbow": 90.0,
             "right_elbow": 90.0,
-            "left_knee": 175.0,
-            "right_knee": 175.0,
+            "left_knee": 165.0,
+            "right_knee": 165.0,
         },
+        target_pos_m=(0.62, 0.62),
+        angle_tolerance_deg=20.0,
+        pos_tolerance_m=0.40,
     ),
     PoseTemplate(
         id="disco_right",
@@ -222,12 +234,15 @@ DEFAULT_TEMPLATES: list[PoseTemplate] = [
         description="Right arm high up-diagonal (145 deg), left arm down (35 deg)",
         expected_angles={
             "right_shoulder": 145.0,
-            "right_elbow": 175.0,
+            "right_elbow": 170.0,
             "left_shoulder": 35.0,
-            "left_elbow": 175.0,
-            "left_knee": 175.0,
-            "right_knee": 175.0,
+            "left_elbow": 170.0,
+            "left_knee": 165.0,
+            "right_knee": 165.0,
         },
+        target_pos_m=(0.62, 0.62),
+        angle_tolerance_deg=20.0,
+        pos_tolerance_m=0.40,
     ),
     PoseTemplate(
         id="disco_left",
@@ -235,12 +250,15 @@ DEFAULT_TEMPLATES: list[PoseTemplate] = [
         description="Left arm high up-diagonal (145 deg), right arm down (35 deg)",
         expected_angles={
             "left_shoulder": 145.0,
-            "left_elbow": 175.0,
+            "left_elbow": 170.0,
             "right_shoulder": 35.0,
-            "right_elbow": 175.0,
-            "left_knee": 175.0,
-            "right_knee": 175.0,
+            "right_elbow": 170.0,
+            "left_knee": 165.0,
+            "right_knee": 165.0,
         },
+        target_pos_m=(0.62, 0.62),
+        angle_tolerance_deg=20.0,
+        pos_tolerance_m=0.40,
     ),
     PoseTemplate(
         id="tree_pose",
@@ -249,27 +267,33 @@ DEFAULT_TEMPLATES: list[PoseTemplate] = [
         expected_angles={
             "left_shoulder": 135.0,
             "right_shoulder": 135.0,
-            "left_knee": 175.0,
+            "left_knee": 165.0,
             "right_knee": 75.0,
         },
+        target_pos_m=(0.62, 0.62),
+        angle_tolerance_deg=20.0,
+        pos_tolerance_m=0.40,
     ),
     PoseTemplate(
         id="l_pose",
         name="L-Pose",
-        description="Left arm straight up (175 deg), right arm straight out (90 deg)",
+        description="Left arm straight up (170 deg), right arm straight out (95 deg)",
         expected_angles={
-            "left_shoulder": 175.0,
-            "left_elbow": 175.0,
-            "right_shoulder": 90.0,
-            "right_elbow": 175.0,
-            "left_knee": 175.0,
-            "right_knee": 175.0,
+            "left_shoulder": 170.0,
+            "left_elbow": 170.0,
+            "right_shoulder": 95.0,
+            "right_elbow": 170.0,
+            "left_knee": 165.0,
+            "right_knee": 165.0,
         },
+        target_pos_m=(0.62, 0.62),
+        angle_tolerance_deg=20.0,
+        pos_tolerance_m=0.40,
     ),
     PoseTemplate(
         id="squat",
         name="Crouch / Squat",
-        description="Both knees bent at 105 deg, arms forward at 90 deg",
+        description="Both knees bent at 105 deg, arms forward at 85 deg",
         expected_angles={
             "left_knee": 105.0,
             "right_knee": 105.0,
@@ -278,6 +302,9 @@ DEFAULT_TEMPLATES: list[PoseTemplate] = [
             "left_elbow": 170.0,
             "right_elbow": 170.0,
         },
+        target_pos_m=(0.62, 0.62),
+        angle_tolerance_deg=20.0,
+        pos_tolerance_m=0.40,
     ),
 ]
 
@@ -371,8 +398,13 @@ def evaluate_pose(
     else:
         match_pct = round(angle_score_pct, 1)
 
-    # Full match threshold: average angle score >= 80% and all critical joints matched
-    is_full_match = (matched_count == total_count) and pos_matched and (match_pct >= 80.0)
+    # Full match threshold: player is in position, and either:
+    # 1. All joints matched with angle score >= 75%, OR
+    # 2. At most 1 minor joint slightly off with overall match score >= 80% (robust against webcam jitter)
+    is_full_match = pos_matched and (
+        (matched_count == total_count and match_pct >= 75.0) or
+        (matched_count >= max(1, total_count - 1) and match_pct >= 80.0)
+    )
     primary_hint = hints[0] if hints else "PERFECT POSE!"
 
     return PoseMatchResult(
