@@ -773,9 +773,12 @@ def main() -> None:
             sys.exit(str(e))
         atexit.register(source.stop)
 
+        print("Waiting for camera and pose model to initialize...")
         t0 = time.monotonic()
         while source.latest_frame() is None:
-            if time.monotonic() - t0 > 5.0:
+            if source.error:
+                sys.exit(f"Tracking error: {source.error}")
+            if time.monotonic() - t0 > 25.0:
                 sys.exit("No frames from the camera.")
             time.sleep(0.05)
 
