@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import json
 import math
+import os
 import sys
+import tempfile
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
@@ -180,6 +184,245 @@ def make_template_ref_posture(template_id: str) -> list[tuple[float, float, floa
 
 
 # ==============================================================================
+# Hands-Free Gesture & Automated Test Run Utilities
+# ==============================================================================
+
+def is_right_hand_raised(
+    debug: dict | None = None,
+    player_pts: Sequence[Any] | None = None,
+    keyboard_mode: bool = False,
+) -> bool:
+    """Detect if the player has raised their right hand above their right shoulder."""
+    # 1. Camera mode: check debug["landmarks_px"] (MediaPipe 2D frame pixels)
+    if debug and debug.get("landmarks_px") and len(debug["landmarks_px"]) >= 29:
+        lms = debug["landmarks_px"]
+        sh = lms[R_SHOULDER]  # Index 12
+        wr = lms[R_WRIST]     # Index 16
+        v_sh = sh[2] if len(sh) >= 3 else 1.0
+        v_wr = wr[2] if len(wr) >= 3 else 1.0
+        if v_sh >= 0.4 and v_wr >= 0.4:
+            # In image coordinates, y is downwards (0 at top).
+            # Hand raised means wrist y is significantly smaller than shoulder y.
+            return wr[1] < (sh[1] - 25.0)
+
+    # 2. Keyboard / synthetic mode: check normalized posture points
+    if keyboard_mode and player_pts and len(player_pts) >= 29:
+        sh = player_pts[R_SHOULDER]
+        wr = player_pts[R_WRIST]
+        return wr[1] < (sh[1] - 0.05)
+
+    return False
+
+
+def generate_diagnostic_report(
+    run_results: list[dict],
+    run_id: str,
+    data_dir: Path | None = None,
+) -> Path:
+    """Compile diagnostic run results into Markdown report and append to history JSON.
+
+    Saves to:
+      - data/wall_shape_diagnostic_report.md
+      - data/wall_shape_history.json
+    Both stay on local system only (gitignored by data/*).
+    """
+    if data_dir is None:
+        data_dir = Path("data")
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    history_file = data_dir / "wall_shape_history.json"
+    history: list[dict] = []
+    if history_file.exists():
+        try:
+            with open(history_file, "r", encoding="utf-8") as f:
+                history = json.load(f)
+        except Exception:
+            history = []
+
+    total_poses = len(run_results)
+    passed_poses = sum(1 for r in run_results if r.get("result") == "PASSED")
+    missed_poses = sum(1 for r in run_results if r.get("result") == "MISSED")
+    pass_rate_pct = (passed_poses / max(1, total_poses)) * 100.0
+
+    current_summary = {
+        "run_id": run_id,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "total_poses": total_poses,
+        "passed": passed_poses,
+        "missed": missed_poses,
+        "pass_rate_pct": round(pass_rate_pct, 1),
+        "results": run_results,
+    }
+    history.append(current_summary)
+
+    try:
+        with open(history_file, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
+    except Exception as e:
+        print(f"Warning: could not save run history to {history_file}: {e}")
+
+    # Build Markdown Report
+    lines: list[str] = [
+        "# Wall Shape (Game B) Diagnostic Test Run Report",
+        "",
+        f"**Run ID**: `{run_id}`  ",
+        f"**Date/Time**: `{current_summary['timestamp']}`  ",
+        f"**Overall Result**: **{passed_poses}/{total_poses} Poses Passed ({pass_rate_pct:.1f}%)**  ",
+        "",
+        "---",
+        "",
+        "## 1. Test Run Parameters",
+        "",
+        "| Parameter | Value | Description |",
+        "| :--- | :--- | :--- |",
+        "| **Pacing** | 3.0s prep countdown + 5.0s approach per wall | Paced pose approach duration |",
+        "| **Hold Requirement** | 1.0s continuous match | Duration player must sustain valid posture to PASS |",
+        "| **Angular Tolerance** | ±20.0° base | Angular error threshold for individual joints |",
+        "| **Hands-Free Trigger** | Right hand raised above shoulder (>=1.2s) | Arming gesture to trigger test run |",
+        "",
+        "---",
+        "",
+        "## 2. Per-Pose Breakdown & Evidence Capture",
+        "",
+    ]
+
+    for item in run_results:
+        idx = item.get("pose_index", 0)
+        name = item.get("template_name", "Unknown")
+        result = item.get("result", "UNKNOWN")
+        match_pct = item.get("match_pct", 0.0)
+        hold_s = item.get("hold_elapsed_s", 0.0)
+        req_hold_s = item.get("required_hold_s", 1.0)
+        snap_path = item.get("snapshot_path", "")
+        joints = item.get("joints", {})
+
+        status_badge = "✅ **PASSED**" if result == "PASSED" else "❌ **MISSED**"
+
+        lines.append(f"### Pose {idx}: {name} — {status_badge}")
+        lines.append("")
+        lines.append(f"- **Outcome**: {result} ({'Match held for required duration' if result == 'PASSED' else 'Timed out during approach'})")
+        lines.append(f"- **Live Match Score**: `{match_pct:.1f}%` (Hold: `{hold_s:.1f}s / {req_hold_s:.1f}s`)")
+        if snap_path:
+            norm_snap = snap_path.replace("\\", "/")
+            lines.append(f"- **Full Canvas Evidence**: [`{Path(snap_path).name}`](file:///{norm_snap})")
+        lines.append("")
+        lines.append("| Joint | Actual Angle | Target Angle | Difference | Status | Evaluation Hint |")
+        lines.append("| :--- | :---: | :---: | :---: | :---: | :--- |")
+
+        failed_joints = []
+        for j_name, j_data in joints.items():
+            disp_j = j_name.replace("_", " ").title()
+            p_ang = j_data.get("player_angle")
+            t_ang = j_data.get("target_angle", 0.0)
+            diff = j_data.get("diff_deg")
+            is_ok = j_data.get("is_matched", False)
+            hint = j_data.get("hint", "")
+
+            p_str = f"{p_ang:.0f}°" if p_ang is not None else "--"
+            t_str = f"{t_ang:.0f}°"
+            diff_str = f"{diff:+.0f}°" if diff is not None else "--"
+            status_str = "PASS" if is_ok else ("NOT VISIBLE" if p_ang is None else "ADJUST")
+
+            lines.append(f"| {disp_j} | {p_str} | {t_str} | {diff_str} | {status_str} | {hint} |")
+            if not is_ok:
+                failed_joints.append((disp_j, p_ang, t_ang, diff, hint))
+
+        lines.append("")
+        lines.append("**Diagnostic Diagnosis:**")
+        if result == "PASSED":
+            lines.append("- All required joints were sustained within angular tolerance. Accurate execution.")
+        else:
+            if not failed_joints:
+                lines.append(f"- Player was out of position or hold time `{hold_s:.1f}s` fell short of required `{req_hold_s:.1f}s` before impact.")
+            else:
+                for j_disp, p_ang, t_ang, diff, hint in failed_joints:
+                    if p_ang is None:
+                        lines.append(f"- **{j_disp}**: *Not Visible / Missing Data*. Landmark visibility was <0.5. Probable camera FOV cutoff or body occlusion.")
+                    elif "Elbow" in j_disp:
+                        lines.append(f"- **{j_disp}**: Deviation `{diff:+.0f}°` (Actual: {p_ang:.0f}°, Target: {t_ang:.0f}°). Hint: '{hint}'. Probable perspective foreshortening if arm was pointed forward/backward, or arm was slightly bent.")
+                    elif "Knee" in j_disp or "Hip" in j_disp:
+                        lines.append(f"- **{j_disp}**: Deviation `{diff:+.0f}°` (Actual: {p_ang:.0f}°, Target: {t_ang:.0f}°). Hint: '{hint}'. Probable loose clothing obscuring leg hinge, or incomplete stance.")
+                    else:
+                        lines.append(f"- **{j_disp}**: Deviation `{diff:+.0f}°` (Actual: {p_ang:.0f}°, Target: {t_ang:.0f}°). Hint: '{hint}'.")
+        lines.append("")
+
+    # Historical multi-run section
+    lines.append("---")
+    lines.append("")
+    lines.append("## 3. Multi-Run Learning & Rule Calibration Recommendations")
+    lines.append("")
+    lines.append(f"Aggregated across **{len(history)}** recorded test run(s).")
+    lines.append("")
+
+    # Aggregate stats across runs
+    pose_stats: dict[str, dict[str, int]] = {}
+    joint_deviations: dict[str, list[float]] = {}
+    joint_fail_counts: dict[str, int] = {}
+
+    for run in history:
+        for r in run.get("results", []):
+            p_name = r.get("template_name", "Unknown")
+            if p_name not in pose_stats:
+                pose_stats[p_name] = {"tested": 0, "passed": 0, "missed": 0}
+            pose_stats[p_name]["tested"] += 1
+            if r.get("result") == "PASSED":
+                pose_stats[p_name]["passed"] += 1
+            else:
+                pose_stats[p_name]["missed"] += 1
+
+            for j_name, j_data in r.get("joints", {}).items():
+                diff = j_data.get("diff_deg")
+                is_matched = j_data.get("is_matched", False)
+                if diff is not None:
+                    joint_deviations.setdefault(j_name, []).append(abs(diff))
+                if not is_matched:
+                    joint_fail_counts[j_name] = joint_fail_counts.get(j_name, 0) + 1
+
+    lines.append("### Cumulative Pose Success Rate")
+    lines.append("")
+    lines.append("| Pose Name | Runs Tested | Passed | Missed | Success Rate |")
+    lines.append("| :--- | :---: | :---: | :---: | :---: |")
+    for p_name, st in pose_stats.items():
+        rate = (st["passed"] / max(1, st["tested"])) * 100.0
+        lines.append(f"| {p_name} | {st['tested']} | {st['passed']} | {st['missed']} | {rate:.1f}% |")
+    lines.append("")
+
+    lines.append("### Joint Deviation & Failure Analysis")
+    lines.append("")
+    lines.append("| Joint | Total Non-Matches | Mean Abs Deviation | Recommendation |")
+    lines.append("| :--- | :---: | :---: | :--- |")
+    for j_name, fails in sorted(joint_fail_counts.items(), key=lambda x: x[1], reverse=True):
+        devs = joint_deviations.get(j_name, [])
+        mean_dev = (sum(devs) / len(devs)) if devs else 0.0
+        j_title = j_name.replace("_", " ").title()
+        if "elbow" in j_name:
+            rec = "Widen tolerance to ±25° to account for 2D perspective foreshortening."
+        elif "knee" in j_name or "hip" in j_name:
+            rec = "Verify camera angle captures full lower body; check standing distance >= 2.0m."
+        else:
+            rec = "Maintain ±20° tolerance; check player alignment."
+        lines.append(f"| {j_title} | {fails} | {mean_dev:.1f}° | {rec} |")
+    lines.append("")
+
+    lines.append("### Actionable Calibration Recommendations for Game B & Engine Integration")
+    lines.append("")
+    lines.append("1. **Tolerance Tuning**: For upper arm/elbow joints, widen default angular tolerance from `±20°` to `±25°`. This accommodates 2D perspective compression when limbs point slightly out of the frontal camera plane without compromising pose distinctiveness.")
+    lines.append("2. **Hold Time Pacing**: Keep required hold time at `1.0s` for standard testing, but support dynamic reduction to `0.8s` in rapid arcade gameplay to reduce player fatigue.")
+    lines.append("3. **Camera Placement**: Ensure the camera is positioned at 0.9m–1.2m height with an unobstructed view of the floor grid, and the player stands centered on the floor target tile (`STAND HERE`) ~2.2m from the lens to guarantee full head-to-toe landmark visibility.")
+    lines.append("4. **Missing Data Handling**: Never score unobserved joints as 0° (which causes false failures). Poses with partial visibility should prompt the player with *'Show your whole body'* rather than failing the pose outright.")
+    lines.append("")
+
+    report_path = data_dir / "wall_shape_diagnostic_report.md"
+    try:
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception as e:
+        print(f"Warning: could not write diagnostic report to {report_path}: {e}")
+
+    return report_path
+
+
+# ==============================================================================
 # Wall Shape Test Engine State (Rule 3 Compliant: No Total Score, No Lives)
 # ==============================================================================
 
@@ -189,10 +432,10 @@ class WallShapeTestState:
     template_idx: int = 0
     angle_tolerance_deg: float = 20.0
     required_hold_s: float = 1.0
-    wall_approach_s: float = 7.0
+    wall_approach_s: float = 5.0
 
     # Live approach loop
-    time_to_impact_s: float = 7.0
+    time_to_impact_s: float = 5.0
     hold_elapsed_s: float = 0.0
 
     # Per-Wall Result (Transient banner, Rule 3)
@@ -208,14 +451,51 @@ class WallShapeTestState:
     kb_arm_offset_deg: float = 0.0
     kb_pos_m: tuple[float, float] = (0.62, 0.62)
 
+    # Automated Diagnostic Test Run State
+    test_run_mode: bool = False
+    test_run_state: str = "STANDBY"  # STANDBY | COUNTDOWN | RUNNING | TRANSITION | COMPLETED
+    hand_raise_timer_s: float = 0.0
+    countdown_timer_s: float = 3.0
+    transition_timer_s: float = 0.0
+    run_id: str = ""
+    run_results: list[dict] = field(default_factory=list)
+    temp_screenshots_dir: Path | None = None
+    should_capture_snapshot: bool = False
+    snapshot_path: str = ""
+
     def current_template(self) -> PoseTemplate:
         return self.templates[self.template_idx % len(self.templates)]
+
+    def start_test_run(self) -> None:
+        """Initiate an automated 8-pose diagnostic test run."""
+        self.test_run_mode = True
+        self.test_run_state = "COUNTDOWN"
+        self.countdown_timer_s = 3.0
+        self.template_idx = 0
+        self.wall_approach_s = 5.0
+        self.time_to_impact_s = 5.0
+        self.hold_elapsed_s = 0.0
+        self.wall_state = "APPROACHING"
+        self.hand_raise_timer_s = 0.0
+        self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.temp_screenshots_dir = Path(tempfile.gettempdir()) / "dodge_dash_wall_shape_runs" / f"run_{self.run_id}"
+        self.temp_screenshots_dir.mkdir(parents=True, exist_ok=True)
+        self.run_results.clear()
+        self.should_capture_snapshot = False
+        self.snapshot_path = ""
+        if self.keyboard_mode:
+            self.kb_posture_id = self.current_template().id
+            self.kb_arm_offset_deg = 0.0
+        print(f"\n[Test Run Started] Run ID: {self.run_id}. Snapshots: {self.temp_screenshots_dir}")
 
     def next_wall(self) -> None:
         self.template_idx = (self.template_idx + 1) % len(self.templates)
         self.time_to_impact_s = self.wall_approach_s
         self.hold_elapsed_s = 0.0
         self.wall_state = "APPROACHING"
+        if self.keyboard_mode:
+            self.kb_posture_id = self.current_template().id
+            self.kb_arm_offset_deg = 0.0
 
     def select_template(self, index: int) -> None:
         if 0 <= index < len(self.templates):
@@ -223,14 +503,107 @@ class WallShapeTestState:
             self.time_to_impact_s = self.wall_approach_s
             self.hold_elapsed_s = 0.0
             self.wall_state = "APPROACHING"
+            if self.keyboard_mode:
+                self.kb_posture_id = self.current_template().id
+                self.kb_arm_offset_deg = 0.0
 
-    def update(self, dt: float, match_result: PoseMatchResult) -> None:
-        """Update wall approach countdown, hold timer, and per-wall result transitions."""
+    def _record_pose_result(self, result_str: str, match_result: PoseMatchResult | None) -> None:
+        tmpl = self.current_template()
+        joints_data = {}
+        match_pct = 0.0
+        is_full = False
+        cov = 0.0
+        rel = False
+        hint = ""
+        if match_result is not None:
+            match_pct = match_result.match_pct
+            is_full = match_result.is_full_match
+            cov = match_result.coverage
+            rel = match_result.reliable
+            hint = match_result.primary_hint
+            for j_name, j_res in match_result.joint_results.items():
+                joints_data[j_name] = {
+                    "player_angle": j_res.player_angle,
+                    "target_angle": j_res.target_angle,
+                    "diff_deg": j_res.diff_deg,
+                    "is_matched": j_res.is_matched,
+                    "hint": j_res.hint,
+                }
+        entry = {
+            "pose_index": self.template_idx + 1,
+            "template_id": tmpl.id,
+            "template_name": tmpl.name,
+            "description": tmpl.description,
+            "result": result_str,
+            "match_pct": match_pct,
+            "is_full_match": is_full,
+            "coverage": cov,
+            "reliable": rel,
+            "hold_elapsed_s": round(self.hold_elapsed_s, 2),
+            "required_hold_s": self.required_hold_s,
+            "angle_tolerance_deg": self.angle_tolerance_deg,
+            "primary_hint": hint,
+            "snapshot_path": self.snapshot_path,
+            "joints": joints_data,
+        }
+        self.run_results.append(entry)
+
+    def update(
+        self,
+        dt: float,
+        match_result: PoseMatchResult | None = None,
+        debug: dict | None = None,
+        pf: PoseFrame | None = None,
+        player_pts: Sequence[Any] | None = None,
+    ) -> None:
+        """Update wall approach countdown, hold timer, and test run state machine."""
+        # Check right hand raise trigger when in STANDBY or COMPLETED
+        if self.test_run_state in ("STANDBY", "COMPLETED"):
+            if is_right_hand_raised(debug=debug, player_pts=player_pts, keyboard_mode=self.keyboard_mode):
+                self.hand_raise_timer_s += dt
+                if self.hand_raise_timer_s >= 1.2:
+                    self.start_test_run()
+                    return
+            else:
+                self.hand_raise_timer_s = max(0.0, self.hand_raise_timer_s - 2.0 * dt)
+
+        # 1. Countdown before starting run
+        if self.test_run_state == "COUNTDOWN":
+            self.countdown_timer_s -= dt
+            if self.countdown_timer_s <= 0.0:
+                self.test_run_state = "RUNNING"
+                self.wall_state = "APPROACHING"
+                self.time_to_impact_s = self.wall_approach_s
+                self.hold_elapsed_s = 0.0
+            return
+
+        # 2. Transition between poses during test run
+        if self.test_run_state == "TRANSITION":
+            self.transition_timer_s -= dt
+            if self.transition_timer_s <= 0.0:
+                if self.template_idx + 1 < len(self.templates):
+                    self.template_idx += 1
+                    self.time_to_impact_s = self.wall_approach_s
+                    self.hold_elapsed_s = 0.0
+                    self.wall_state = "APPROACHING"
+                    self.test_run_state = "RUNNING"
+                    if self.keyboard_mode:
+                        self.kb_posture_id = self.current_template().id
+                        self.kb_arm_offset_deg = 0.0
+                else:
+                    # Completed all 8 poses!
+                    self.test_run_state = "COMPLETED"
+                    self.test_run_mode = False
+                    report_path = generate_diagnostic_report(self.run_results, self.run_id)
+                    print(f"\n[Test Run Completed] 8/8 poses evaluated. Report saved to: {report_path}")
+            return
+
+        # 3. Running / Approaching wall
         if self.wall_state == "APPROACHING":
             self.time_to_impact_s = max(0.0, self.time_to_impact_s - dt)
 
             # Hold progress accumulates if pose matches
-            if match_result.is_full_match:
+            if match_result is not None and match_result.is_full_match:
                 self.hold_elapsed_s = min(self.required_hold_s, self.hold_elapsed_s + dt)
             else:
                 # Slight decay on imperfect pose to reward sustained posture
@@ -241,16 +614,35 @@ class WallShapeTestState:
                 self.wall_state = "PASSED"
                 self.result_banner_msg = "WALL PASSED! (Match Held)"
                 self.result_banner_col = C_PASS
-                self.result_display_s = 1.5
+                self.result_display_s = 1.8
                 self.last_wall_result = f"PASSED ({self.current_template().name})"
+
+                if self.test_run_mode:
+                    if self.temp_screenshots_dir:
+                        snap_name = f"pose_{self.template_idx + 1:02d}_{self.current_template().id}_passed.png"
+                        self.snapshot_path = str(self.temp_screenshots_dir / snap_name)
+                        self.should_capture_snapshot = True
+                    self._record_pose_result("PASSED", match_result)
+                    self.test_run_state = "TRANSITION"
+                    self.transition_timer_s = 1.8
+
             elif self.time_to_impact_s <= 0.0:
                 self.wall_state = "MISSED"
                 self.result_banner_msg = "WALL MISSED! (Timed Out)"
                 self.result_banner_col = C_FAIL
-                self.result_display_s = 1.5
+                self.result_display_s = 1.8
                 self.last_wall_result = f"MISSED ({self.current_template().name})"
 
-        elif self.wall_state in ("PASSED", "MISSED"):
+                if self.test_run_mode:
+                    if self.temp_screenshots_dir:
+                        snap_name = f"pose_{self.template_idx + 1:02d}_{self.current_template().id}_missed.png"
+                        self.snapshot_path = str(self.temp_screenshots_dir / snap_name)
+                        self.should_capture_snapshot = True
+                    self._record_pose_result("MISSED", match_result)
+                    self.test_run_state = "TRANSITION"
+                    self.transition_timer_s = 1.8
+
+        elif self.wall_state in ("PASSED", "MISSED") and not self.test_run_mode:
             self.result_display_s -= dt
             if self.result_display_s <= 0.0:
                 self.next_wall()
@@ -472,12 +864,54 @@ def render_stage_view(
                         cv2.circle(view, pt, 8, (255, 255, 255), 1, cv2.LINE_AA)
 
     # 5. Top Guidance Banner & Per-Wall Result (Rule 3)
-    if state.wall_state in ("PASSED", "MISSED"):
+    if state.test_run_state == "COUNTDOWN":
+        # Centered countdown box before starting test run
+        overlay = view.copy()
+        cv2.rectangle(overlay, (STAGE_W // 2 - 200, STAGE_H // 2 - 95),
+                      (STAGE_W // 2 + 200, STAGE_H // 2 + 95), (12, 14, 20), -1)
+        cv2.addWeighted(overlay, 0.88, view, 0.12, 0, view)
+        cv2.rectangle(view, (STAGE_W // 2 - 200, STAGE_H // 2 - 95),
+                      (STAGE_W // 2 + 200, STAGE_H // 2 + 95), C_CYAN, 2)
+        cv2.putText(view, "TEST RUN STARTING", (STAGE_W // 2 - 130, STAGE_H // 2 - 50),
+                    FONT, 0.65, C_TEXT_WHITE, 2, cv2.LINE_AA)
+        cv2.putText(view, f"Get Ready for Pose 1: {state.current_template().name}",
+                    (STAGE_W // 2 - 145, STAGE_H // 2 - 20), FONT, 0.44, C_TEXT_GREY, 1, cv2.LINE_AA)
+        cnt_num = str(int(math.ceil(state.countdown_timer_s)))
+        cv2.putText(view, cnt_num, (STAGE_W // 2 - 20, STAGE_H // 2 + 65),
+                    FONT, 2.2, C_PASS, 4, cv2.LINE_AA)
+
+    elif state.test_run_state == "COMPLETED":
+        # Centered completion summary card
+        overlay = view.copy()
+        cv2.rectangle(overlay, (STAGE_W // 2 - 230, STAGE_H // 2 - 105),
+                      (STAGE_W // 2 + 230, STAGE_H // 2 + 105), (12, 14, 20), -1)
+        cv2.addWeighted(overlay, 0.90, view, 0.10, 0, view)
+        cv2.rectangle(view, (STAGE_W // 2 - 230, STAGE_H // 2 - 105),
+                      (STAGE_W // 2 + 230, STAGE_H // 2 + 105), C_PASS, 2)
+        cv2.putText(view, "DIAGNOSTIC RUN COMPLETED", (STAGE_W // 2 - 175, STAGE_H // 2 - 60),
+                    FONT, 0.65, C_CYAN, 2, cv2.LINE_AA)
+        passed_cnt = sum(1 for r in state.run_results if r.get("result") == "PASSED")
+        tot_cnt = len(state.run_results)
+        rate_val = (passed_cnt / max(1, tot_cnt)) * 100.0
+        cv2.putText(view, f"Passed: {passed_cnt}/{tot_cnt} Poses ({rate_val:.0f}%)",
+                    (STAGE_W // 2 - 110, STAGE_H // 2 - 20), FONT, 0.58, C_TEXT_WHITE, 2, cv2.LINE_AA)
+        cv2.putText(view, "Report saved to data/wall_shape_diagnostic_report.md",
+                    (STAGE_W // 2 - 200, STAGE_H // 2 + 20), FONT, 0.38, C_PASS, 1, cv2.LINE_AA)
+        cv2.putText(view, "Raise Right Hand or Press [R] to Run Again",
+                    (STAGE_W // 2 - 170, STAGE_H // 2 + 65), FONT, 0.44, C_WARN, 1, cv2.LINE_AA)
+
+    elif state.wall_state in ("PASSED", "MISSED"):
         # Big Per-Wall Announcement Banner
         overlay = view.copy()
         cv2.rectangle(overlay, (0, 0), (STAGE_W, 70), (10, 10, 15), -1)
         cv2.addWeighted(overlay, 0.75, view, 0.25, 0, view)
         cv2.putText(view, state.result_banner_msg, (STAGE_W // 2 - 190, 45), FONT, 0.85, state.result_banner_col, 2, cv2.LINE_AA)
+
+        # In test run mode, display upcoming pose teaser
+        if state.test_run_mode and state.template_idx + 1 < len(state.templates):
+            nxt_name = state.templates[state.template_idx + 1].name
+            cv2.putText(view, f"UP NEXT: [{state.template_idx + 2}/8] {nxt_name}",
+                        (STAGE_W // 2 - 120, STAGE_H - 45), FONT, 0.50, C_TEXT_WHITE, 1, cv2.LINE_AA)
     else:
         # Live directional cue
         cue_msg = match_res.primary_hint if match_res.primary_hint else "HOLD POSE!"
@@ -486,6 +920,16 @@ def render_stage_view(
         cv2.putText(view, cue_msg, (16, 29), FONT, 0.60, cue_col, 2, cv2.LINE_AA)
         time_str = f"Approach: {state.time_to_impact_s:.1f}s"
         cv2.putText(view, time_str, (STAGE_W - 165, 29), FONT, 0.52, C_TEXT_WHITE, 1, cv2.LINE_AA)
+
+    # Arming Progress Indicator when right hand is raised
+    if state.test_run_state in ("STANDBY", "COMPLETED") and state.hand_raise_timer_s > 0.0:
+        arm_pct = min(1.0, state.hand_raise_timer_s / 1.2)
+        cv2.rectangle(view, (0, 0), (STAGE_W, 36), (15, 20, 28), -1)
+        fill_w = int(STAGE_W * arm_pct)
+        if fill_w > 0:
+            cv2.rectangle(view, (0, 0), (fill_w, 36), (0, 160, 80), -1)
+        cv2.putText(view, f"ARMING TEST RUN: Hold Right Hand Up... ({int(arm_pct * 100)}%)",
+                    (16, 24), FONT, 0.52, (255, 255, 255), 2, cv2.LINE_AA)
 
     # Bottom Hold Progress Indicator on Stage
     hold_ratio = max(0.0, min(1.0, state.hold_elapsed_s / state.required_hold_s))
@@ -520,7 +964,8 @@ def render_sidebar_panel(
     # Section 2: Active Wall Card
     cv2.rectangle(panel, (12, y), (SIDEBAR_W - 12, y + 68), C_CARD_BG, -1)
     cv2.rectangle(panel, (12, y), (SIDEBAR_W - 12, y + 68), C_BORDER, 1)
-    w_title = f"Wall [{state.template_idx + 1}/{len(state.templates)}]: {tmpl.name}"
+    w_prefix = f"RUN [{state.template_idx + 1}/{len(state.templates)}]" if state.test_run_mode else f"Wall [{state.template_idx + 1}/{len(state.templates)}]"
+    w_title = f"{w_prefix}: {tmpl.name}"
     cv2.putText(panel, w_title, (22, y + 24), FONT, 0.52, C_TEXT_WHITE, 2, cv2.LINE_AA)
     cv2.putText(panel, tmpl.description[:46], (22, y + 44), FONT, 0.36, C_TEXT_GREY, 1, cv2.LINE_AA)
     tol_txt = f"Tol: +/-{state.angle_tolerance_deg:.0f} deg | Req Hold: {state.required_hold_s:.1f}s"
@@ -613,8 +1058,9 @@ def render_sidebar_panel(
     cv2.rectangle(panel, (12, y), (SIDEBAR_W - 12, CANVAS_H - 12), C_BORDER, 1)
 
     cv2.putText(panel, f"App FPS: {fps:.0f} | Pose FPS: {pose_fps:.0f}", (20, y + 18), FONT, 0.35, C_TEXT_MUTED, 1, cv2.LINE_AA)
-    cv2.putText(panel, "[1-8]: Select Pose  [Space]: Next Wall", (20, y + 36), FONT, 0.34, C_TEXT_GREY, 1, cv2.LINE_AA)
-    cv2.putText(panel, "[T]: Tol (+/-15 deg)  [H]: Hold Time", (20, y + 52), FONT, 0.34, C_TEXT_GREY, 1, cv2.LINE_AA)
+    run_txt = "[R]: Run Active (Paced)" if state.test_run_mode else "[R]: Start Test Run"
+    cv2.putText(panel, f"{run_txt}  [Space]: Next", (20, y + 36), FONT, 0.34, C_PASS if state.test_run_mode else C_TEXT_WHITE, 1, cv2.LINE_AA)
+    cv2.putText(panel, "[1-8]: Select Pose  [T]: Tol  [H]: Hold", (20, y + 52), FONT, 0.34, C_TEXT_GREY, 1, cv2.LINE_AA)
     kb_str = "ON (Synthetic)" if state.keyboard_mode else "OFF (Webcam)"
     cv2.putText(panel, f"[K]: Keyboard Mode: {kb_str}", (20, y + 68), FONT, 0.34, C_CYAN if state.keyboard_mode else C_TEXT_GREY, 1, cv2.LINE_AA)
 
@@ -709,12 +1155,21 @@ def step_frame(
         )
 
     # Update Wall Shape test engine
-    state.update(dt, match_result)
+    state.update(dt, match_result, debug=debug, pf=pf, player_pts=pts_to_evaluate)
 
     # Render stage and sidebar
     stage = render_stage_view(cam_frame, state, match_result, pts_to_evaluate, mapper=mapper, pf=pf, debug=debug)
     sidebar = render_sidebar_panel(state, match_result, fps, pose_fps)
     canvas = np.hstack([stage, sidebar])
+
+    # Save diagnostic snapshot if triggered
+    if state.should_capture_snapshot and state.snapshot_path:
+        try:
+            os.makedirs(os.path.dirname(state.snapshot_path), exist_ok=True)
+            cv2.imwrite(state.snapshot_path, canvas)
+        except Exception as e:
+            print(f"Warning: Failed to save snapshot {state.snapshot_path}: {e}")
+        state.should_capture_snapshot = False
 
     return canvas, match_result
 
@@ -729,7 +1184,7 @@ def main() -> None:
     parser.add_argument("--camera", type=int, default=0, help="camera device index (default: 0)")
     parser.add_argument("--tolerance", type=float, default=20.0, help="angular tolerance in degrees (default: 20.0)")
     parser.add_argument("--hold", type=float, default=1.0, help="required hold time in seconds (default: 1.0)")
-    parser.add_argument("--wall-time", type=float, default=7.0, help="wall approach duration in seconds (default: 7.0)")
+    parser.add_argument("--wall-time", type=float, default=5.0, help="wall approach duration in seconds (default: 5.0)")
     parser.add_argument("--template", type=str, default="", help="initial template id (e.g. t_pose, star, cactus)")
     parser.add_argument("--headless", action="store_true", help="run headlessly without opening GUI window")
     args = parser.parse_args()
@@ -762,6 +1217,7 @@ def main() -> None:
     print("==================================================================")
     print(" WALL SHAPE (Game B) - BASELINE TEST HARNESS")
     print(" Controls:")
+    print("   [R]          : Start Automated 8-Pose Test Run (or raise right hand)")
     print("   [1-8]        : Select pose (1:T-Pose, 2:Star, 3:Cactus, 4:Tree...)")
     print("   [Space]      : Cycle to next wall template")
     print("   [T]          : Toggle angle tolerance (+/-10, +/-15, +/-20, +/-25 deg)")
@@ -811,6 +1267,8 @@ def main() -> None:
 
             if key in (ord("q"), 27):  # Q or ESC
                 break
+            elif key in (ord("r"), ord("R")):
+                state.start_test_run()
             elif key == ord(" "):       # Space: Next wall
                 state.next_wall()
             elif key in [ord(str(i)) for i in range(1, 9)]:
