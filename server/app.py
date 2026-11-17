@@ -5,15 +5,26 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from pathlib import Path
 import re
+import socket
 import threading
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+from cards.generator import generate_card
+from cards.qr import generate_qr_png_bytes
+from cards.uploader import (
+    get_cached_card_url,
+    get_or_upload_public_card_url,
+    invalidate_card_url,
+    upload_card_if_online,
+)
 
 DATA = Path("data")
 SCORES_FILE = DATA / "scores.jsonl"
@@ -21,12 +32,47 @@ PLAYERS_FILE = DATA / "players.json"
 PHOTOS_DIR = DATA / "photos"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-app = FastAPI(title="Dodge & Drip server")
+app = FastAPI(title="Titans' Arcade server")
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 _lock = threading.Lock()
 _seen_event_ids: set[str] = set()
+
+OPERATOR_PIN = os.environ.get("OPERATOR_PIN", "2026")
+LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+def _is_operator_authorized(request: Request) -> bool:
+    client_host = request.client.host if request.client else ""
+    if client_host in LOCAL_HOSTS:
+        return True
+    pin = request.query_params.get("pin") or request.headers.get("x-operator-pin")
+    if pin and pin.strip() == os.environ.get("OPERATOR_PIN", "2026"):
+        return True
+    return False
+
+
+def _check_operator_auth(request: Request) -> None:
+    if not _is_operator_authorized(request):
+        raise HTTPException(status_code=403, detail="Forbidden: Operator PIN required")
+
+
+def _bg_process_card_upload(player_id: str) -> None:
+    if os.environ.get("DISABLE_PUBLIC_UPLOAD") == "1":
+        return
+    try:
+        invalidate_card_url(player_id, data_dir=DATA)
+        card_path = generate_card(player_id, data_dir=DATA, output_dir=DATA / "cards")
+        get_or_upload_public_card_url(card_path, player_id, data_dir=DATA)
+    except Exception:
+        pass
+
+
+def _trigger_bg_upload(player_id: str) -> None:
+    if os.environ.get("DISABLE_PUBLIC_UPLOAD") == "1":
+        return
+    threading.Thread(target=_bg_process_card_upload, args=(player_id,), daemon=True).start()
 
 
 def _load_seen_event_ids() -> None:
@@ -120,7 +166,8 @@ def health() -> dict:
 
 
 @app.post("/api/players", response_model=PlayerOut)
-def register_player(player_in: PlayerCreate) -> Any:
+def register_player(player_in: PlayerCreate, request: Request) -> Any:
+    _check_operator_auth(request)
     clean_name = player_in.name.strip()
     if not clean_name:
         raise HTTPException(status_code=422, detail="Name cannot be empty")
@@ -171,7 +218,8 @@ def register_player(player_in: PlayerCreate) -> Any:
         }
         players.append(profile)
         _write_players_locked(players)
-        return profile
+    _trigger_bg_upload(player_id)
+    return profile
 
 
 @app.get("/api/players", response_model=list[PlayerOut])
@@ -208,6 +256,7 @@ def post_score(event: ScoreIn) -> dict:
         with SCORES_FILE.open("a", encoding="utf-8") as f:
             f.write(json.dumps(event.model_dump()) + "\n")
         _seen_event_ids.add(event.event_id)
+    _trigger_bg_upload(event.player_id)
     return {"accepted": True, "duplicate": False}
 
 
@@ -269,6 +318,301 @@ def leaderboard() -> dict[str, list[dict]]:
     return result
 
 
+def _get_lan_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
+
+
+def _resolve_base_url(request: Request) -> str:
+    host = request.headers.get("host", "").strip()
+    if host == "testserver":
+        return "http://testserver"
+    if host and not host.startswith("localhost") and not host.startswith("127.0.0.1"):
+        return f"http://{host}"
+    lan_ip = _get_lan_ip()
+    port = ""
+    if ":" in host:
+        port = ":" + host.split(":", 1)[1]
+    else:
+        port = ":8000"
+    return f"http://{lan_ip}{port}"
+
+
+@app.get("/api/cards/{player_id}")
+def get_player_card(player_id: str, request: Request) -> FileResponse:
+    with _lock:
+        players = _read_players_locked()
+        found = any(p.get("player_id") == player_id for p in players)
+    if not found:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    base_url = _resolve_base_url(request)
+    try:
+        card_path = generate_card(player_id, data_dir=DATA, output_dir=DATA / "cards", base_url=base_url)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return FileResponse(
+        card_path,
+        media_type="image/png",
+        headers={"Content-Disposition": f'inline; filename="TitansArcade_{player_id}.png"'},
+    )
+
+
+@app.get("/api/cards/{player_id}/download")
+def download_player_card(player_id: str, request: Request) -> FileResponse:
+    with _lock:
+        players = _read_players_locked()
+        found = any(p.get("player_id") == player_id for p in players)
+    if not found:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    base_url = _resolve_base_url(request)
+    try:
+        card_path = generate_card(player_id, data_dir=DATA, output_dir=DATA / "cards", base_url=base_url)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return FileResponse(
+        card_path,
+        media_type="image/png",
+        headers={"Content-Disposition": f'attachment; filename="TitansArcade_{player_id}.png"'},
+    )
+
+
+def _resolve_card_share_data(player_id: str, request: Request | None = None) -> tuple[str, bool]:
+    """Ensure data/cards/{player_id}.png is generated and resolve the direct download URL.
+    Returns (url, is_public).
+    """
+    base_url = _resolve_base_url(request) if request is not None else f"http://{_get_lan_ip()}:8000"
+    card_path = generate_card(player_id, data_dir=DATA, output_dir=DATA / "cards", base_url=base_url)
+
+    public_base = os.environ.get("PUBLIC_CARD_BASE_URL", "").strip()
+    if public_base:
+        return f"{public_base.rstrip('/')}/{player_id}.png", True
+
+    uploaded_url = get_or_upload_public_card_url(card_path, player_id, data_dir=DATA)
+    if uploaded_url and (uploaded_url.startswith("https://") or uploaded_url.startswith("http://")):
+        return uploaded_url, True
+
+    return f"{base_url.rstrip('/')}/api/cards/{player_id}/download", False
+
+
+@app.get("/api/qr/{player_id}")
+def get_player_qr(player_id: str, request: Request) -> Response:
+    with _lock:
+        players = _read_players_locked()
+        found = any(p.get("player_id") == player_id for p in players)
+    if not found:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    card_url, _ = _resolve_card_share_data(player_id, request=request)
+    png_bytes = generate_qr_png_bytes(card_url, box_size=8, border=3)
+    return Response(content=png_bytes, media_type="image/png")
+
+
+@app.get("/api/cards/{player_id}/share-info")
+def get_card_share_info(player_id: str, request: Request) -> dict[str, Any]:
+    with _lock:
+        players = _read_players_locked()
+        found = any(p.get("player_id") == player_id for p in players)
+    if not found:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    card_url, is_public = _resolve_card_share_data(player_id, request=request)
+    mode = "PUBLIC CLOUD MODE" if is_public else "LOCAL LAN OFFLINE MODE"
+    return {
+        "player_id": player_id,
+        "mode": mode,
+        "is_public": is_public,
+        "url": card_url,
+        "qr_url": f"/api/qr/{player_id}",
+        "card_url": f"/api/cards/{player_id}",
+        "download_url": f"/api/cards/{player_id}/download",
+    }
+
+
+@app.get("/card/{player_id}", response_class=HTMLResponse)
+def souvenir_card_page(player_id: str) -> HTMLResponse:
+    with _lock:
+        players = _read_players_locked()
+        player = next((p for p in players if p.get("player_id") == player_id), None)
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    name = player.get("name", "Challenger")
+    roll_no = player.get("roll_no")
+    roll_display = f" | URN: {roll_no}" if roll_no else ""
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Titans' Arcade - Souvenir Card - {player_id}</title>
+<style>
+  :root {{
+    --twilight-dark: #35235d;
+    --twilight-purple: #48327a;
+    --sunset-pink: #ea7d8b;
+    --sunset-gold: #ffd152;
+    --retro-green: #58c038;
+    --neon-cyan: #00f0ff;
+    --font-pixel: "Consolas", "Courier New", monospace;
+    --font-retro: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  }}
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    color: #f8fafc;
+    font-family: var(--font-retro);
+    background-color: #2c1b4e;
+    background-image:
+      url('/static/bg-sunset.png'),
+      linear-gradient(180deg, #2b1e4a 0%, #5c3787 42%, #d97398 72%, #fca289 84%, #4ea832 84%, #5c3a21 90%);
+    background-size: cover, cover;
+    background-position: center bottom, center bottom;
+    background-attachment: fixed, fixed;
+    padding: 16px 12px 32px 12px;
+  }}
+  .scanlines {{
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 50;
+    background: linear-gradient(
+      rgba(72, 50, 122, 0) 50%,
+      rgba(35, 18, 65, 0.22) 50%
+    );
+    background-size: 100% 4px;
+  }}
+  .card-container {{
+    width: 100%;
+    max-width: 520px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    position: relative;
+    z-index: 10;
+  }}
+  header {{
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 4px 16px 4px;
+  }}
+  .brand-title {{
+    font-family: var(--font-pixel);
+    font-size: 18px;
+    font-weight: 900;
+    letter-spacing: 2px;
+    color: var(--sunset-gold);
+    text-shadow: 0 0 10px rgba(255, 209, 82, 0.85);
+  }}
+  .nav-btn {{
+    font-family: var(--font-pixel);
+    font-size: 11px;
+    font-weight: 700;
+    color: #fbcfe8;
+    background: rgba(53, 35, 93, 0.9);
+    border: 1px solid var(--sunset-pink);
+    padding: 6px 12px;
+    border-radius: 4px;
+    text-decoration: none;
+    letter-spacing: 1px;
+  }}
+  .player-tag {{
+    font-family: var(--font-pixel);
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--neon-cyan);
+    margin-bottom: 12px;
+    text-align: center;
+  }}
+  .card-preview {{
+    width: 100%;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 12px 36px rgba(18, 9, 32, 0.8), 0 0 20px rgba(234, 125, 139, 0.35);
+    border: 2px solid var(--sunset-pink);
+    background: #1e1038;
+  }}
+  .card-preview img {{
+    width: 100%;
+    height: auto;
+    display: block;
+  }}
+  .action-box {{
+    width: 100%;
+    margin-top: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }}
+  .btn-download {{
+    display: block;
+    width: 100%;
+    padding: 14px 20px;
+    background: linear-gradient(135deg, #ea7d8b 0%, #fca289 100%);
+    color: #1f0b2e;
+    font-family: var(--font-pixel);
+    font-size: 15px;
+    font-weight: 900;
+    text-align: center;
+    text-decoration: none;
+    letter-spacing: 1px;
+    border-radius: 6px;
+    border: none;
+    box-shadow: 0 4px 14px rgba(234, 125, 139, 0.6);
+  }}
+  .btn-download:active {{
+    transform: translateY(2px);
+  }}
+  .card-footer-info {{
+    font-family: var(--font-pixel);
+    font-size: 11px;
+    color: #d8b4fe;
+    text-align: center;
+    margin-top: 8px;
+    line-height: 1.5;
+  }}
+</style>
+</head>
+<body>
+<div class="scanlines"></div>
+<div class="card-container">
+  <header>
+    <div class="brand-title">TITANS' ARCADE</div>
+    <a href="/" class="nav-btn">LEADERBOARD</a>
+  </header>
+  <div class="player-tag">★ SOUVENIR CARD: {name} ({player_id}){roll_display} ★</div>
+  <div class="card-preview">
+    <img src="/api/cards/{player_id}" alt="Titans' Arcade Souvenir Card - {player_id}" />
+  </div>
+  <div class="action-box">
+    <a href="/api/cards/{player_id}" download="TitansArcade_{player_id}.png" class="btn-download">
+      ⬇ DOWNLOAD SOUVENIR CARD
+    </a>
+    <div class="card-footer-info">
+      Full 1080×1350 High Resolution PNG • 100% Offline Local Network<br>
+      Saved directly to your device • Share with friends!
+    </div>
+  </div>
+</div>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+
 @app.get("/", response_class=HTMLResponse)
 def big_screen_display() -> str:
     """Public Big-Screen Spectator Display for Projector / TV (F11 fullscreen)."""
@@ -277,7 +621,7 @@ def big_screen_display() -> str:
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dodge &amp; Drip - Leaderboard</title>
+<title>Titans' Arcade - Leaderboard</title>
 <style>
   :root {
     --twilight-dark: #35235d;
@@ -511,7 +855,7 @@ def big_screen_display() -> str:
   }
   .lb-table th {
     font-family: var(--font-pixel);
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 800;
     color: rgba(251, 207, 232, 0.95);
     letter-spacing: 1.2px;
@@ -636,7 +980,7 @@ def big_screen_display() -> str:
 
 <header>
   <div class="header-inner">
-    <div class="brand-title">DODGE &amp; DRIP</div>
+    <div class="brand-title">TITANS' ARCADE</div>
     <div class="header-right">
       <div class="live-status">
         <span class="live-dot"></span>
@@ -654,7 +998,7 @@ def big_screen_display() -> str:
       <div></div>
       <h2 class="panel-title">LEADERBOARD</h2>
       <div class="game-modes">
-        <button class="tab-btn active" data-game="dodge" onclick="switchTab('dodge')">DODGE</button>
+        <button class="tab-btn active" data-game="dodge" onclick="switchTab('dodge')">FLOOR IS LAVA</button>
         <button class="tab-btn" data-game="wall" onclick="switchTab('wall')">WALL SHAPE</button>
         <button class="tab-btn" data-game="dance" onclick="switchTab('dance')">DANCE</button>
       </div>
@@ -753,14 +1097,15 @@ def big_screen_display() -> str:
 
 
 @app.get("/register", response_class=HTMLResponse)
-def operator_desk() -> str:
+def operator_desk(request: Request) -> str:
     """Operator Check-In & Roster Desk for Laptop 3 operator."""
+    _check_operator_auth(request)
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dodge &amp; Drip - Player Registration</title>
+<title>Titans' Arcade - Player Registration</title>
 <style>
   :root {
     --twilight-dark: #35235d;
@@ -1006,8 +1351,8 @@ def operator_desk() -> str:
   }
   .form-group label {
     font-family: var(--font-pixel);
-    font-size: 11px;
-    font-weight: 700;
+    font-size: 14px;
+    font-weight: 800;
     text-transform: uppercase;
     color: #fbcfe8;
     letter-spacing: 1px;
@@ -1173,7 +1518,7 @@ def operator_desk() -> str:
     background: var(--retro-green);
     color: #14260d;
     padding: 13px 16px;
-    font-size: 13px;
+    font-size: 16px;
     font-weight: 900;
     box-shadow:
       inset 0 3px 0 #a7f3d0,
@@ -1193,7 +1538,7 @@ def operator_desk() -> str:
     background: rgba(72, 50, 122, 0.92);
     color: #fce7f3;
     padding: 11px 16px;
-    font-size: 11px;
+    font-size: 14px;
     font-weight: 700;
     border: 1px solid rgba(192, 132, 252, 0.45);
     box-shadow:
@@ -1239,7 +1584,7 @@ def operator_desk() -> str:
     background: rgba(61, 39, 107, 0.85);
     padding: 11px 12px;
     font-family: var(--font-pixel);
-    font-size: 10px;
+    font-size: 13px;
     font-weight: 800;
     text-transform: uppercase;
     letter-spacing: 1px;
@@ -1286,7 +1631,7 @@ def operator_desk() -> str:
   }
   .pid-badge {
     font-family: var(--font-pixel);
-    font-size: 12px;
+    font-size: 15px;
     font-weight: 800;
     color: var(--neon-cyan);
     text-shadow: 0 0 6px rgba(0, 240, 255, 0.7);
@@ -1295,16 +1640,140 @@ def operator_desk() -> str:
     display: inline-block;
     background: var(--twilight-dark);
     border: 1px solid rgba(234, 125, 139, 0.5);
-    padding: 2px 8px;
+    padding: 4px 10px;
     border-radius: 4px;
     font-family: var(--font-pixel);
-    font-size: 11px;
+    font-size: 14px;
     color: #fbcfe8;
   }
   .height-cell {
     font-family: var(--font-pixel);
     font-size: 13px;
     color: var(--sunset-peach);
+  }
+  .btn-action-qr {
+    background: rgba(53, 35, 93, 0.85);
+    border: 1px solid var(--neon-cyan);
+    color: var(--neon-cyan);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, box-shadow 0.15s, transform 0.1s;
+  }
+  .btn-action-qr:hover {
+    background: var(--neon-cyan);
+    color: #1b0e33;
+    box-shadow: 0 0 10px rgba(0, 240, 255, 0.6);
+  }
+  .btn-action-qr:active {
+    transform: scale(0.95);
+  }
+
+  /* Modal Backdrop & Dialog */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(18, 9, 32, 0.85);
+    backdrop-filter: blur(6px);
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+  }
+  .modal-card {
+    background: #241442;
+    border: 2px solid var(--sunset-gold);
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.8), 0 0 20px rgba(255, 209, 82, 0.4);
+    border-radius: 8px;
+    width: 100%;
+    max-width: 420px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .modal-header {
+    background: #35235d;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid rgba(255, 209, 82, 0.3);
+  }
+  .modal-title {
+    font-family: var(--font-pixel);
+    font-size: 13px;
+    font-weight: 800;
+    color: var(--sunset-gold);
+    letter-spacing: 1px;
+  }
+  .modal-close-btn {
+    background: none;
+    border: none;
+    color: #fbcfe8;
+    font-size: 18px;
+    font-weight: 800;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+  }
+  .modal-close-btn:hover { color: var(--sunset-pink); }
+  .modal-body {
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+  }
+  .modal-qr-img {
+    width: 200px;
+    height: 200px;
+    border-radius: 6px;
+    border: 2px solid var(--sunset-gold);
+    background: #fff;
+    box-shadow: 0 0 16px rgba(255, 209, 82, 0.3);
+  }
+  .modal-info {
+    font-family: var(--font-pixel);
+    font-size: 11px;
+    color: #fbcfe8;
+    text-align: center;
+    line-height: 1.5;
+  }
+  .modal-actions {
+    display: flex;
+    gap: 10px;
+    width: 100%;
+    margin-top: 4px;
+  }
+  .modal-btn-primary {
+    flex: 1;
+    background: linear-gradient(135deg, #ea7d8b, #fca289);
+    color: #1f0b2e;
+    font-family: var(--font-pixel);
+    font-size: 12px;
+    font-weight: 800;
+    padding: 10px 12px;
+    border-radius: 4px;
+    text-align: center;
+    text-decoration: none;
+    border: none;
+  }
+  .modal-btn-secondary {
+    flex: 1;
+    background: #35235d;
+    border: 1px solid var(--neon-cyan);
+    color: var(--neon-cyan);
+    font-family: var(--font-pixel);
+    font-size: 12px;
+    font-weight: 800;
+    padding: 10px 12px;
+    border-radius: 4px;
+    text-align: center;
+    text-decoration: none;
   }
 </style>
 </head>
@@ -1313,7 +1782,7 @@ def operator_desk() -> str:
 
 <header>
   <div class="header-inner">
-    <div class="brand-title">DODGE &amp; DRIP</div>
+    <div class="brand-title">TITANS' ARCADE</div>
     <div class="header-right">
       <div class="live-status">
         <span class="live-dot"></span>
@@ -1383,6 +1852,17 @@ def operator_desk() -> str:
         <div style="font-size: 11px; color: var(--neon-cyan); margin-top: 6px;">
           Send player to Station A or Station B with this ID!
         </div>
+        <div id="reg-qr-section" style="margin-top: 12px; padding: 10px; background: #201138; border: 1px solid #5a3c8c; border-radius: 6px; text-align: center;">
+          <div style="font-family: var(--font-pixel); font-size: 10px; font-weight: 800; color: var(--sunset-gold); margin-bottom: 6px; letter-spacing: 0.5px;">
+            SCAN WITH PHONE FOR SOUVENIR CARD
+          </div>
+          <img id="reg-qr-img" src="" alt="QR Code" style="width: 120px; height: 120px; border-radius: 4px; border: 1px solid var(--sunset-gold); background: #fff;" />
+          <div style="margin-top: 6px;">
+            <a id="reg-card-link" href="#" target="_blank" style="font-family: var(--font-pixel); font-size: 10px; color: var(--neon-cyan); text-decoration: underline;">
+              Open Souvenir Card Page ↗
+            </a>
+          </div>
+        </div>
       </div>
 
       <div id="reg-warning" class="registered-card" style="display:none; border-color: var(--sunset-pink); box-shadow: 0 0 15px rgba(234, 125, 139, 0.35);">
@@ -1419,6 +1899,7 @@ def operator_desk() -> str:
               <th>NAME</th>
               <th>URN</th>
               <th>HEIGHT</th>
+              <th style="width: 100px; text-align: center;">PHOTOCARD</th>
             </tr>
           </thead>
           <tbody id="roster-body">
@@ -1434,6 +1915,25 @@ def operator_desk() -> str:
 </main>
 
 <canvas id="snapshot-canvas" style="display:none;"></canvas>
+
+<!-- Modal for QR & Souvenir Card -->
+<div id="qr-modal" class="modal-backdrop" style="display: none;" onclick="if(event.target===this)closeQrModal()">
+  <div class="modal-card">
+    <div class="modal-header">
+      <div class="modal-title" id="modal-player-title">PLAYER PHOTO CARD</div>
+      <button class="modal-close-btn" type="button" onclick="closeQrModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="modal-network-mode" style="font-family: var(--font-pixel); font-size: 11px; font-weight: 800; padding: 4px 10px; border-radius: 4px; display: inline-block; margin-bottom: 8px; letter-spacing: 0.5px; background: rgba(88, 192, 56, 0.15); color: var(--retro-green); border: 1px solid rgba(88, 192, 56, 0.4);">CHECKING NETWORK...</div>
+      <img id="modal-qr-img" src="" alt="QR" class="modal-qr-img" />
+      <div class="modal-info" id="modal-player-info">Scan with phone camera to download high-res souvenir photo card</div>
+      <div class="modal-actions">
+        <a id="modal-view-card" href="#" target="_blank" class="modal-btn-primary">View Souvenir Page</a>
+        <a id="modal-download-card" href="#" download class="modal-btn-secondary">Download PNG</a>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script>
   let videoStream = null;
@@ -1487,10 +1987,16 @@ def operator_desk() -> str:
     const height_cm = heightInput.value ? parseFloat(heightInput.value) : null;
     const photo_base64 = withPhoto ? capturePhotoBase64() : null;
 
+    const urlPin = new URLSearchParams(window.location.search).get('pin');
+    const reqHeaders = { 'Content-Type': 'application/json' };
+    if (urlPin) {
+      reqHeaders['X-Operator-Pin'] = urlPin;
+    }
+
     try {
       const res = await fetch('/api/players', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: reqHeaders,
         body: JSON.stringify({ name, roll_no, height_cm, photo_base64 })
       });
 
@@ -1534,6 +2040,8 @@ def operator_desk() -> str:
       document.getElementById('reg-pid').textContent = data.player_id;
       document.getElementById('reg-name').textContent = 'Name: ' + data.name;
       document.getElementById('reg-roll').textContent = 'URN: ' + (data.roll_no || 'None');
+      document.getElementById('reg-qr-img').src = '/api/qr/' + data.player_id + '?t=' + Date.now();
+      document.getElementById('reg-card-link').href = '/api/cards/' + data.player_id + '/download';
       document.getElementById('reg-success').style.display = 'block';
 
       nameInput.value = '';
@@ -1598,9 +2106,62 @@ def operator_desk() -> str:
         <td style="font-weight: 700; color: #fff;">${p.name}</td>
         <td>${rollHtml}</td>
         <td>${heightHtml}</td>
+        <td style="text-align: center;">
+          <button class="btn-action-qr" type="button" title="Open Photocard QR &amp; Download" onclick="openQrModal('${p.player_id}', '${p.name.replace(/'/g, "\\'")}')">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display: block;">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+          </button>
+        </td>
       </tr>`;
     }).join('');
   }
+
+  function openQrModal(pid, name) {
+    document.getElementById('modal-player-title').textContent = 'Photo Card: ' + name + ' (' + pid + ')';
+    document.getElementById('modal-qr-img').src = '/api/qr/' + pid + '?t=' + Date.now();
+    document.getElementById('modal-view-card').href = '/api/cards/' + pid;
+    document.getElementById('modal-download-card').href = '/api/cards/' + pid + '/download';
+    document.getElementById('modal-download-card').download = 'TitansArcade_' + pid + '.png';
+
+    const modeEl = document.getElementById('modal-network-mode');
+    if (modeEl) {
+      modeEl.textContent = 'CHECKING NETWORK...';
+      modeEl.style.background = 'rgba(255, 209, 82, 0.15)';
+      modeEl.style.color = '#ffd152';
+      modeEl.style.borderColor = 'rgba(255, 209, 82, 0.4)';
+    }
+
+    fetch('/api/cards/' + pid + '/share-info')
+      .then(res => res.json())
+      .then(info => {
+        if (modeEl && info.mode) {
+          modeEl.textContent = info.mode;
+          if (info.is_public) {
+            modeEl.style.background = 'rgba(88, 192, 56, 0.2)';
+            modeEl.style.color = '#58c038';
+            modeEl.style.borderColor = '#58c038';
+          } else {
+            modeEl.style.background = 'rgba(234, 125, 139, 0.2)';
+            modeEl.style.color = '#ea7d8b';
+            modeEl.style.borderColor = '#ea7d8b';
+          }
+        }
+      })
+      .catch(() => {});
+
+    document.getElementById('qr-modal').style.display = 'flex';
+  }
+
+  function closeQrModal() {
+    document.getElementById('qr-modal').style.display = 'none';
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeQrModal();
+  });
 
   initCamera();
   loadRoster();

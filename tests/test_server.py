@@ -150,7 +150,8 @@ def test_big_screen_display_offline(client):
     res = client.get("/")
     assert res.status_code == 200
     html = res.text
-    assert "DODGE &amp; DRIP" in html or "DODGE & DRIP" in html
+    assert "TITANS' ARCADE" in html or "Titans' Arcade" in html
+    assert "FLOOR IS LAVA" in html
     assert "REGISTRATION PANEL" in html
     assert "LEADERBOARD" in html
     assert "LIVE RESULTS" in html
@@ -177,7 +178,7 @@ def test_operator_desk_offline(client):
     res = client.get("/register")
     assert res.status_code == 200
     html = res.text
-    assert "DODGE &amp; DRIP" in html or "DODGE & DRIP" in html
+    assert "TITANS' ARCADE" in html or "Titans' Arcade" in html
     assert "LEADERBOARD" in html
     assert "Player Registration" in html
     assert "URN" in html
@@ -185,6 +186,11 @@ def test_operator_desk_offline(client):
     assert "Snap &amp; Register Player" in html or "Snap & Register Player" in html
     assert "aspect-ratio: 4 / 3" in html or "aspect-ratio: 4/3" in html
     assert "max-height: 44vh" in html
+    assert "font-size: 14px" in html
+    assert "font-size: 16px" in html
+    assert "font-size: 13px" in html
+    assert "font-size: 15px" in html
+    assert "padding: 4px 10px" in html
     assert "navigator.mediaDevices.getUserMedia" in html
     # Check interactive drag-to-resize divider elements & features
     assert "drag-divider" in html
