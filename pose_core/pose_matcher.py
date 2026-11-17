@@ -196,8 +196,10 @@ class PoseTemplate:
     description: str
     expected_angles: dict[str, float]
     target_pos_m: tuple[float, float] | None = None  # Floor coordinate target (x, y) or None
-    angle_tolerance_deg: float = 15.0                # Baseline tolerance (+/- degrees)
-    pos_tolerance_m: float = 0.25                    # Metric distance tolerance (+/- metres)
+    angle_tolerance_deg: float = 20.0                # Baseline tolerance (+/- degrees)
+    pos_tolerance_m: float = 0.40                    # Metric distance tolerance (+/- metres)
+    joint_tolerances: dict[str, float] = field(default_factory=dict)  # Per-joint custom tolerances
+    cue: str = ""                                    # Clear human guidance cue
 
 
 @dataclass
@@ -233,6 +235,8 @@ DEFAULT_TEMPLATES: list[PoseTemplate] = [
         target_pos_m=(0.62, 0.62),
         angle_tolerance_deg=20.0,
         pos_tolerance_m=0.40,
+        joint_tolerances={"left_elbow": 25.0, "right_elbow": 25.0},
+        cue="Arms straight out horizontally, legs straight",
     ),
     PoseTemplate(
         id="star",
@@ -249,6 +253,8 @@ DEFAULT_TEMPLATES: list[PoseTemplate] = [
         target_pos_m=(0.62, 0.62),
         angle_tolerance_deg=20.0,
         pos_tolerance_m=0.40,
+        joint_tolerances={"left_elbow": 25.0, "right_elbow": 25.0, "left_shoulder": 22.0, "right_shoulder": 22.0},
+        cue="Arms high in a Y shape, legs straight",
     ),
     PoseTemplate(
         id="cactus",
@@ -265,6 +271,8 @@ DEFAULT_TEMPLATES: list[PoseTemplate] = [
         target_pos_m=(0.62, 0.62),
         angle_tolerance_deg=20.0,
         pos_tolerance_m=0.40,
+        joint_tolerances={"left_elbow": 25.0, "right_elbow": 25.0},
+        cue="Shoulders level, elbows bent UP at 90 deg",
     ),
     PoseTemplate(
         id="disco_right",
@@ -281,6 +289,8 @@ DEFAULT_TEMPLATES: list[PoseTemplate] = [
         target_pos_m=(0.62, 0.62),
         angle_tolerance_deg=20.0,
         pos_tolerance_m=0.40,
+        joint_tolerances={"left_elbow": 25.0, "right_elbow": 25.0, "left_knee": 25.0, "right_knee": 25.0},
+        cue="Raise RIGHT arm UP, keep LEFT arm DOWN",
     ),
     PoseTemplate(
         id="disco_left",
@@ -297,6 +307,8 @@ DEFAULT_TEMPLATES: list[PoseTemplate] = [
         target_pos_m=(0.62, 0.62),
         angle_tolerance_deg=20.0,
         pos_tolerance_m=0.40,
+        joint_tolerances={"left_elbow": 25.0, "right_elbow": 25.0, "left_knee": 25.0, "right_knee": 25.0},
+        cue="Raise LEFT arm UP, keep RIGHT arm DOWN",
     ),
     PoseTemplate(
         id="tree_pose",
@@ -311,6 +323,8 @@ DEFAULT_TEMPLATES: list[PoseTemplate] = [
         target_pos_m=(0.62, 0.62),
         angle_tolerance_deg=20.0,
         pos_tolerance_m=0.40,
+        joint_tolerances={"right_knee": 30.0, "left_knee": 25.0, "left_shoulder": 22.0, "right_shoulder": 22.0},
+        cue="Arms high, stand on LEFT leg, bend RIGHT knee",
     ),
     PoseTemplate(
         id="l_pose",
@@ -327,6 +341,8 @@ DEFAULT_TEMPLATES: list[PoseTemplate] = [
         target_pos_m=(0.62, 0.62),
         angle_tolerance_deg=20.0,
         pos_tolerance_m=0.40,
+        joint_tolerances={"left_elbow": 25.0, "right_elbow": 25.0},
+        cue="LEFT arm straight UP, RIGHT arm horizontal",
     ),
     PoseTemplate(
         id="squat",
@@ -343,6 +359,8 @@ DEFAULT_TEMPLATES: list[PoseTemplate] = [
         target_pos_m=(0.62, 0.62),
         angle_tolerance_deg=20.0,
         pos_tolerance_m=0.40,
+        joint_tolerances={"left_knee": 25.0, "right_knee": 25.0, "left_elbow": 25.0, "right_elbow": 25.0},
+        cue="Bend both knees into a squat, arms forward",
     ),
 ]
 
@@ -412,7 +430,15 @@ def evaluate_pose(
 
         visible_count += 1
         diff = abs(act_angle - tgt_angle)
-        is_matched = diff <= angle_tol
+
+        # Determine joint tolerance: apply joint-specific custom tolerance
+        if angle_tolerance_override is not None:
+            base_offset = template.joint_tolerances.get(j_name, template.angle_tolerance_deg) - template.angle_tolerance_deg
+            j_tol = max(5.0, angle_tolerance_override + base_offset)
+        else:
+            j_tol = template.joint_tolerances.get(j_name, angle_tol)
+
+        is_matched = diff <= j_tol
 
         # Hint generation
         hint = "OK"
@@ -427,13 +453,13 @@ def evaluate_pose(
                 hint = "Stand upright" if act_angle < tgt_angle else "Squat lower"
             hints.append(f"{j_name.replace('_', ' ').title()}: {hint}")
 
-        # Linear scoring falloff: 100% within 5 deg, down to 0% at 2 * tol
+        # Linear scoring falloff: 100% within 5 deg, down to 0% at 2 * j_tol
         if diff <= 5.0:
             score = 100.0
-        elif diff <= angle_tol:
-            score = 100.0 - 30.0 * ((diff - 5.0) / max(1.0, angle_tol - 5.0))
+        elif diff <= j_tol:
+            score = 100.0 - 30.0 * ((diff - 5.0) / max(1.0, j_tol - 5.0))
         else:
-            score = max(0.0, 70.0 - 70.0 * ((diff - angle_tol) / max(1.0, angle_tol)))
+            score = max(0.0, 70.0 - 70.0 * ((diff - j_tol) / max(1.0, j_tol)))
 
         joint_scores.append(score)
         joint_results[j_name] = JointComparison(
@@ -452,6 +478,21 @@ def evaluate_pose(
     # Coverage and reliability
     coverage = round(visible_count / total_count, 3) if total_count > 0 else 0.0
     reliable = (coverage >= 0.7) and bool(player_tracked)
+
+    # Smart mirror-inversion check for asymmetrical poses
+    l_sh_act = player_angles.get("left_shoulder")
+    r_sh_act = player_angles.get("right_shoulder")
+    l_sh_tgt = template.expected_angles.get("left_shoulder")
+    r_sh_tgt = template.expected_angles.get("right_shoulder")
+    if (
+        l_sh_act is not None and r_sh_act is not None and
+        l_sh_tgt is not None and r_sh_tgt is not None
+    ):
+        if abs(l_sh_tgt - r_sh_tgt) >= 50.0:
+            if r_sh_tgt > l_sh_tgt and r_sh_act < 80.0 and l_sh_act > 110.0:
+                hints.insert(0, "Swap arms! (Raise RIGHT arm, lower LEFT arm)")
+            elif l_sh_tgt > r_sh_tgt and l_sh_act < 80.0 and r_sh_act > 110.0:
+                hints.insert(0, "Swap arms! (Raise LEFT arm, lower RIGHT arm)")
 
     # Position evaluation
     pos_dist = 0.0
@@ -494,7 +535,12 @@ def evaluate_pose(
             (matched_count == total_count and match_pct >= 75.0) or
             (matched_count >= max(1, total_count - 1) and match_pct >= 80.0)
         )
-        primary_hint = hints[0] if hints else "PERFECT POSE!"
+        if hints:
+            primary_hint = hints[0]
+        elif template.cue and not is_full_match:
+            primary_hint = template.cue
+        else:
+            primary_hint = "PERFECT POSE!"
 
     return PoseMatchResult(
         match_pct=match_pct,
