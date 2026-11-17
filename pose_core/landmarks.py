@@ -102,6 +102,7 @@ class JumpDetector:
     """
 
     def __init__(self):
+        self.hip_lift = 0.0
         self.reset()
 
     def reset(self):
@@ -109,6 +110,7 @@ class JumpDetector:
         self.ground_r = None
         self.ground_h = None
         self.frames = 0
+        self.hip_lift = 0.0
 
     @property
     def rising(self) -> bool:
@@ -128,9 +130,12 @@ class JumpDetector:
         lift_r = (self.ground_r - yr) / torso
         feet_up = min(lift_l, lift_r)
         up = feet_up > JUMP_LIFT
+        if y_hip is not None and self.ground_h is not None:
+            self.hip_lift = (self.ground_h - y_hip) / torso
+        else:
+            self.hip_lift = 0.0
         if up and y_hip is not None and HIP_RISE_RATIO > 0:
-            hip_lift = (self.ground_h - y_hip) / torso
-            up = hip_lift >= HIP_RISE_RATIO * feet_up
+            up = self.hip_lift >= HIP_RISE_RATIO * feet_up
         self.frames = self.frames + 1 if up else 0
         airborne = self.frames >= JUMP_FRAMES
         if not up:  # follow slow changes (walking closer / further)
