@@ -102,14 +102,42 @@ def extract_pose_angles(
     landmarks: Sequence[Any],
     visibility: Sequence[float] | None = None,
     min_vis: float = 0.5,
+    mirrored: bool | None = None,
 ) -> dict[str, float | None]:
     """Extract all frontal joint angles in degrees (0..180) from a 33-point landmark list.
 
-    Works identically with MediaPipe normalized landmarks, pixel landmarks, or Skeleton3D points.
-    Returns None for any joint whose landmarks have visibility < min_vis or cannot be computed.
+    Works with mirrored live camera landmarks, unmirrored landmarks, or Skeleton3D points.
+    If mirrored is None, automatically detects whether landmarks are mirrored (e.g. from cv2.flip):
+    in a mirrored view, landmark 12 (MediaPipe's right shoulder) is on the screen-left (smaller x)
+    which corresponds to the player's physical left arm.
     """
     if len(landmarks) < 29:
         return {}
+
+    # Check mirror orientation if not explicitly provided
+    if mirrored is None:
+        p11 = _get_coord(landmarks[L_SHOULDER])
+        p12 = _get_coord(landmarks[R_SHOULDER])
+        # In a mirrored camera view, landmark 12 is on screen-left (smaller x),
+        # meaning MediaPipe's 'right' (12) is the player's physical left.
+        mirrored = (p12[0] < p11[0])
+
+    if mirrored:
+        # Player's Physical Left (screen-left) uses MediaPipe indices (12, 14, 16, 24, 26, 28)
+        # Player's Physical Right (screen-right) uses MediaPipe indices (11, 13, 15, 23, 25, 27)
+        idx_l_sh, idx_r_sh = R_SHOULDER, L_SHOULDER
+        idx_l_el, idx_r_el = R_ELBOW, L_ELBOW
+        idx_l_wr, idx_r_wr = R_WRIST, L_WRIST
+        idx_l_hip, idx_r_hip = R_HIP, L_HIP
+        idx_l_kn, idx_r_kn = R_KNEE, L_KNEE
+        idx_l_ank, idx_r_ank = R_ANKLE, L_ANKLE
+    else:
+        idx_l_sh, idx_r_sh = L_SHOULDER, R_SHOULDER
+        idx_l_el, idx_r_el = L_ELBOW, R_ELBOW
+        idx_l_wr, idx_r_wr = L_WRIST, R_WRIST
+        idx_l_hip, idx_r_hip = L_HIP, R_HIP
+        idx_l_kn, idx_r_kn = L_KNEE, R_KNEE
+        idx_l_ank, idx_r_ank = L_ANKLE, R_ANKLE
 
     def joint_ang(p1_idx: int, vertex_idx: int, p2_idx: int) -> float | None:
         v1 = _get_vis(landmarks[p1_idx], p1_idx, visibility)
@@ -124,20 +152,20 @@ def extract_pose_angles(
         return round(ang, 1) if ang is not None else None
 
     # 1. Elbow angles (forearm relative to upper arm: 180 = straight, 90 = bent)
-    left_elbow = joint_ang(L_SHOULDER, L_ELBOW, L_WRIST)
-    right_elbow = joint_ang(R_SHOULDER, R_ELBOW, R_WRIST)
+    left_elbow = joint_ang(idx_l_sh, idx_l_el, idx_l_wr)
+    right_elbow = joint_ang(idx_r_sh, idx_r_el, idx_r_wr)
 
     # 2. Shoulder angles (upper arm relative to torso spine: 0 = down, 90 = T-pose, 180 = overhead)
-    left_shoulder = joint_ang(L_HIP, L_SHOULDER, L_ELBOW)
-    right_shoulder = joint_ang(R_HIP, R_SHOULDER, R_ELBOW)
+    left_shoulder = joint_ang(idx_l_hip, idx_l_sh, idx_l_el)
+    right_shoulder = joint_ang(idx_r_hip, idx_r_sh, idx_r_el)
 
     # 3. Knee angles (lower leg relative to thigh: 180 = straight, 90 = bent)
-    left_knee = joint_ang(L_HIP, L_KNEE, L_ANKLE)
-    right_knee = joint_ang(R_HIP, R_KNEE, R_ANKLE)
+    left_knee = joint_ang(idx_l_hip, idx_l_kn, idx_l_ank)
+    right_knee = joint_ang(idx_r_hip, idx_r_kn, idx_r_ank)
 
     # 4. Hip angles (thigh relative to torso: 180 = straight standing, 90 = squat/seated)
-    left_hip = joint_ang(L_SHOULDER, L_HIP, L_KNEE)
-    right_hip = joint_ang(R_SHOULDER, R_HIP, R_KNEE)
+    left_hip = joint_ang(idx_l_sh, idx_l_hip, idx_l_kn)
+    right_hip = joint_ang(idx_r_sh, idx_r_hip, idx_r_kn)
 
     # 5. Torso spine inclination (angle of spine vector relative to vertical)
     ls_vis = _get_vis(landmarks[L_SHOULDER], L_SHOULDER, visibility)
@@ -488,11 +516,23 @@ def evaluate_pose(
         l_sh_act is not None and r_sh_act is not None and
         l_sh_tgt is not None and r_sh_tgt is not None
     ):
-        if abs(l_sh_tgt - r_sh_tgt) >= 50.0:
-            if r_sh_tgt > l_sh_tgt and r_sh_act < 80.0 and l_sh_act > 110.0:
-                hints.insert(0, "Swap arms! (Raise RIGHT arm, lower LEFT arm)")
-            elif l_sh_tgt > r_sh_tgt and l_sh_act < 80.0 and r_sh_act > 110.0:
-                hints.insert(0, "Swap arms! (Raise LEFT arm, lower RIGHT arm)")
+        if r_sh_tgt - l_sh_tgt >= 50.0 and l_sh_act - r_sh_act >= 40.0:
+            hints.insert(0, "Swap arms! (Raise RIGHT arm, lower LEFT arm)")
+        elif l_sh_tgt - r_sh_tgt >= 50.0 and r_sh_act - l_sh_act >= 40.0:
+            hints.insert(0, "Swap arms! (Raise LEFT arm, lower RIGHT arm)")
+
+    l_kn_act = player_angles.get("left_knee")
+    r_kn_act = player_angles.get("right_knee")
+    l_kn_tgt = template.expected_angles.get("left_knee")
+    r_kn_tgt = template.expected_angles.get("right_knee")
+    if (
+        l_kn_act is not None and r_kn_act is not None and
+        l_kn_tgt is not None and r_kn_tgt is not None
+    ):
+        if l_kn_tgt - r_kn_tgt >= 50.0 and r_kn_act - l_kn_act >= 40.0:
+            hints.insert(0, "Swap legs! (Bend RIGHT knee, stand on LEFT leg)")
+        elif r_kn_tgt - l_kn_tgt >= 50.0 and l_kn_act - r_kn_act >= 40.0:
+            hints.insert(0, "Swap legs! (Bend LEFT knee, stand on RIGHT leg)")
 
     # Position evaluation
     pos_dist = 0.0

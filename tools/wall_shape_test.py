@@ -187,29 +187,64 @@ def make_template_ref_posture(template_id: str) -> list[tuple[float, float, floa
 # Hands-Free Gesture & Automated Test Run Utilities
 # ==============================================================================
 
+def _lm_xyv(lm: Any) -> tuple[float, float, float]:
+    """Extract (x, y, visibility) safely from landmark coordinate."""
+    if isinstance(lm, (tuple, list)):
+        x = float(lm[0])
+        y = float(lm[1])
+        v = float(lm[2]) if len(lm) >= 3 else 1.0
+        return (x, y, v)
+    if hasattr(lm, "x") and hasattr(lm, "y"):
+        return (float(lm.x), float(lm.y), float(getattr(lm, "visibility", 1.0)))
+    if isinstance(lm, dict) and "x" in lm and "y" in lm:
+        return (float(lm["x"]), float(lm["y"]), float(lm.get("visibility", 1.0)))
+    return (0.0, 0.0, 0.0)
+
+
 def is_right_hand_raised(
     debug: dict | None = None,
     player_pts: Sequence[Any] | None = None,
     keyboard_mode: bool = False,
 ) -> bool:
-    """Detect if the player has raised their right hand above their right shoulder."""
-    # 1. Camera mode: check debug["landmarks_px"] (MediaPipe 2D frame pixels)
+    """Detect if the player has raised their physical right hand above their right shoulder."""
+    # 1. Camera mode: check debug["landmarks_px"] or debug["pts"]
+    lms = None
+    thresh = 25.0
     if debug and debug.get("landmarks_px") and len(debug["landmarks_px"]) >= 29:
         lms = debug["landmarks_px"]
-        sh = lms[R_SHOULDER]  # Index 12
-        wr = lms[R_WRIST]     # Index 16
-        v_sh = sh[2] if len(sh) >= 3 else 1.0
-        v_wr = wr[2] if len(wr) >= 3 else 1.0
+        thresh = 25.0
+    elif debug and debug.get("pts") and len(debug["pts"]) >= 29:
+        lms = debug["pts"]
+        thresh = 0.05
+
+    if lms is not None:
+        p11_x, _, _ = _lm_xyv(lms[L_SHOULDER])
+        p12_x, _, _ = _lm_xyv(lms[R_SHOULDER])
+        # In a mirrored camera view, index 12 is screen-left (smaller x),
+        # so physical right hand is on screen-right (index 11 shoulder, 15 wrist).
+        if p12_x < p11_x:
+            sh_x, sh_y, v_sh = _lm_xyv(lms[L_SHOULDER])
+            wr_x, wr_y, v_wr = _lm_xyv(lms[L_WRIST])
+        else:
+            sh_x, sh_y, v_sh = _lm_xyv(lms[R_SHOULDER])
+            wr_x, wr_y, v_wr = _lm_xyv(lms[R_WRIST])
+
         if v_sh >= 0.4 and v_wr >= 0.4:
             # In image coordinates, y is downwards (0 at top).
             # Hand raised means wrist y is significantly smaller than shoulder y.
-            return wr[1] < (sh[1] - 25.0)
+            return wr_y < (sh_y - thresh)
 
     # 2. Keyboard / synthetic mode: check normalized posture points
     if keyboard_mode and player_pts and len(player_pts) >= 29:
-        sh = player_pts[R_SHOULDER]
-        wr = player_pts[R_WRIST]
-        return wr[1] < (sh[1] - 0.05)
+        p11_x, _, _ = _lm_xyv(player_pts[L_SHOULDER])
+        p12_x, _, _ = _lm_xyv(player_pts[R_SHOULDER])
+        if p12_x < p11_x:
+            sh_x, sh_y, _ = _lm_xyv(player_pts[L_SHOULDER])
+            wr_x, wr_y, _ = _lm_xyv(player_pts[L_WRIST])
+        else:
+            sh_x, sh_y, _ = _lm_xyv(player_pts[R_SHOULDER])
+            wr_x, wr_y, _ = _lm_xyv(player_pts[R_WRIST])
+        return wr_y < (sh_y - 0.05)
 
     return False
 
@@ -799,25 +834,6 @@ def render_stage_view(
         cv2.circle(view, (px, py), 6, C_WALL_NAVY, -1, cv2.LINE_AA)
 
     # 4. Draw Player Skeleton (Color-coded: Green = within tolerance, Red/Amber = adjust)
-    def is_joint_ok(j_idx: int) -> bool:
-        """Unconstrained joints (Head, Hips, Wrists, Ankles) default to green unless requested."""
-        name_map = {
-            11: "left_shoulder",
-            12: "right_shoulder",
-            13: "left_elbow",
-            14: "right_elbow",
-            23: "left_hip",
-            24: "right_hip",
-            25: "left_knee",
-            26: "right_knee",
-        }
-        j_name = name_map.get(j_idx)
-        if j_name is None:
-            return True
-        if j_name in match_res.joint_results:
-            return match_res.joint_results[j_name].is_matched
-        return True
-
     player_px: list[tuple[int, int]] = []
     vis_list: list[float] = []
 
@@ -836,6 +852,43 @@ def render_stage_view(
             py = int(cy + (ry - 0.5) * (STAGE_H * 0.68) * w_scale)
             player_px.append((px, py))
             vis_list.append(1.0)
+
+    # Detect if rendered skeleton is horizontally mirrored (e.g. cv2.flip camera view)
+    is_mirrored = False
+    if len(player_px) >= 25:
+        is_mirrored = (player_px[12][0] < player_px[11][0])
+
+    def is_joint_ok(j_idx: int) -> bool:
+        """Unconstrained joints (Head, Hips, Wrists, Ankles) default to green unless requested."""
+        if is_mirrored:
+            # In mirrored view: index 12 is screen-left (physical left), index 11 is screen-right (physical right)
+            name_map = {
+                12: "left_shoulder",
+                11: "right_shoulder",
+                14: "left_elbow",
+                13: "right_elbow",
+                24: "left_hip",
+                23: "right_hip",
+                26: "left_knee",
+                25: "right_knee",
+            }
+        else:
+            name_map = {
+                11: "left_shoulder",
+                12: "right_shoulder",
+                13: "left_elbow",
+                14: "right_elbow",
+                23: "left_hip",
+                24: "right_hip",
+                25: "left_knee",
+                26: "right_knee",
+            }
+        j_name = name_map.get(j_idx)
+        if j_name is None:
+            return True
+        if j_name in match_res.joint_results:
+            return match_res.joint_results[j_name].is_matched
+        return True
 
     if player_px:
         # Draw bones (visibility >= 0.5 for both joints)
