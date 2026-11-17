@@ -88,7 +88,7 @@ class PoseTracker:
 
     def update(self, people, img_w: int, img_h: int, ts: float,
                world_people: list | None = None) -> PoseFrame:
-        self.debug = {"foot_px": None, "pts": [], "lift": 0.0, "body_ok": False}
+        self.debug = {"foot_px": None, "pts": [], "lift": 0.0, "body_ok": False, "landmarks_px": []}
 
         cands = []
         for idx, lms in enumerate(people):
@@ -99,6 +99,7 @@ class PoseTracker:
             dist = math.hypot(fx - self.last_floor[0], fy - self.last_floor[1])
             c["rank"] = (0 if self.mapper.inside(fx, fy) else 1, dist)  # in the box first, then nearest
             c["idx"] = idx
+            c["lms"] = lms
             cands.append(c)
 
         if not cands:
@@ -152,8 +153,9 @@ class PoseTracker:
         pf = PoseFrame(timestamp=ts, tracked=True, floor_x_m=pos[0], floor_y_m=pos[1],
                        left_foot_m=lf, right_foot_m=rf, arms_up=c["arms_up"], airborne=airborne)
         self.last_pf, self.last_good_ts = pf, ts
+        landmarks_px = [(l.x * img_w, l.y * img_h, getattr(l, "visibility", 1.0)) for l in c["lms"]]
         self.debug = {"foot_px": tuple(centre), "pts": c["pts"], "lift": lift,
-                      "body_ok": c["torso"] is not None}
+                      "body_ok": c["torso"] is not None, "landmarks_px": landmarks_px}
         return pf
 
 

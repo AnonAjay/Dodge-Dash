@@ -30,6 +30,7 @@ from pose_core.pose_matcher import (
     evaluate_pose,
     extract_angles_from_skeleton,
     extract_pose_angles,
+    make_untracked_result,
     snapshot_pose_match,
 )
 from shared.contracts import PoseFrame
@@ -78,6 +79,35 @@ CORE_BONES: list[tuple[int, int]] = [
     (24, 26), (26, 28), # Right Leg
     (0, 11),  (0, 12),  # Neck / Head
 ]
+
+
+class StageMap:
+    """Uniform scaling and letterbox mapping from camera frame pixels to stage pixels."""
+
+    def __init__(self, frame_w: int, frame_h: int, stage_w: int = STAGE_W, stage_h: int = STAGE_H):
+        self.frame_w = frame_w
+        self.frame_h = frame_h
+        self.stage_w = stage_w
+        self.stage_h = stage_h
+
+        self.s = min(stage_w / frame_w, stage_h / frame_h)
+        self.scaled_w = int(round(frame_w * self.s))
+        self.scaled_h = int(round(frame_h * self.s))
+        self.ox = (stage_w - self.scaled_w) / 2.0
+        self.oy = (stage_h - self.scaled_h) / 2.0
+
+    def to_stage(self, x: float, y: float) -> tuple[int, int]:
+        sx = int(round(x * self.s + self.ox))
+        sy = int(round(y * self.s + self.oy))
+        return (sx, sy)
+
+    def render_base_stage(self, frame: np.ndarray) -> np.ndarray:
+        resized = cv2.resize(frame, (self.scaled_w, self.scaled_h))
+        stage = np.zeros((self.stage_h, self.stage_w, 3), dtype=np.uint8)
+        x_start = int(round(self.ox))
+        y_start = int(round(self.oy))
+        stage[y_start:y_start + self.scaled_h, x_start:x_start + self.scaled_w] = resized
+        return stage
 
 
 # ==============================================================================
@@ -238,8 +268,11 @@ def render_stage_view(
     debug: dict | None = None,
 ) -> np.ndarray:
     """Render mirrored camera feed, floor grid/standing zone, oncoming cut-out wall, and player skeleton."""
+    stage_map = None
     if frame is not None:
-        view = cv2.resize(frame, (STAGE_W, STAGE_H))
+        fh, fw = frame.shape[:2]
+        stage_map = StageMap(fw, fh, STAGE_W, STAGE_H)
+        view = stage_map.render_base_stage(frame)
     else:
         # Dark studio stage canvas for keyboard / offline mode
         view = np.full((STAGE_H, STAGE_W, 3), C_BG, dtype=np.uint8)
@@ -250,7 +283,7 @@ def render_stage_view(
             cv2.line(view, (STAGE_W // 2, STAGE_H // 2), (gx, STAGE_H), (28, 30, 40), 1, cv2.LINE_AA)
 
     # 1. Perspective Floor Grid & Standing Target Zone on Live Video
-    if mapper is not None and frame is not None:
+    if mapper is not None and stage_map is not None:
         w_m, h_m = mapper.w_m, mapper.h_m
         grid_overlay = view.copy()
 
@@ -259,53 +292,51 @@ def render_stage_view(
         dx, dy = w_m / cols, h_m / rows
         for c in range(cols + 1):
             x = min(w_m, c * dx)
-            p1 = mapper.to_pixels(x, 0.0)
-            p2 = mapper.to_pixels(x, h_m)
-            cv2.line(grid_overlay, (int(round(p1[0])), int(round(p1[1]))),
-                     (int(round(p2[0])), int(round(p2[1]))), (140, 130, 60), 1, cv2.LINE_AA)
+            p1 = stage_map.to_stage(*mapper.to_pixels(x, 0.0))
+            p2 = stage_map.to_stage(*mapper.to_pixels(x, h_m))
+            cv2.line(grid_overlay, p1, p2, (140, 130, 60), 1, cv2.LINE_AA)
 
         for r in range(rows + 1):
             y = min(h_m, r * dy)
-            p1 = mapper.to_pixels(0.0, y)
-            p2 = mapper.to_pixels(w_m, y)
-            cv2.line(grid_overlay, (int(round(p1[0])), int(round(p1[1]))),
-                     (int(round(p2[0])), int(round(p2[1]))), (140, 130, 60), 1, cv2.LINE_AA)
+            p1 = stage_map.to_stage(*mapper.to_pixels(0.0, y))
+            p2 = stage_map.to_stage(*mapper.to_pixels(w_m, y))
+            cv2.line(grid_overlay, p1, p2, (140, 130, 60), 1, cv2.LINE_AA)
 
         # Center target standing zone (Center 1x1 tile)
         c_corners_m = [
             (dx, dy), (2 * dx, dy), (2 * dx, 2 * dy), (dx, 2 * dy)
         ]
-        c_corners_px = np.array([mapper.to_pixels(x, y) for x, y in c_corners_m], dtype=np.int32)
+        c_corners_px = np.array([stage_map.to_stage(*mapper.to_pixels(x, y)) for x, y in c_corners_m], dtype=np.int32)
         in_pos = match_res.pos_matched
         tile_tint = (0, 90, 0) if in_pos else (90, 70, 0)
         cv2.fillPoly(grid_overlay, [c_corners_px], tile_tint)
 
         # Floor arena boundary
-        poly = mapper.corners_px.astype(np.int32).reshape(-1, 1, 2)
+        poly = np.array([stage_map.to_stage(pt[0], pt[1]) for pt in mapper.corners_px], dtype=np.int32).reshape(-1, 1, 2)
         border_col = C_PASS if in_pos else C_WARN
         cv2.polylines(grid_overlay, [poly], True, border_col, 2, cv2.LINE_AA)
 
         cv2.addWeighted(grid_overlay, 0.45, view, 0.55, 0, view)
 
         # "STAND HERE" Target Label on floor
-        c_px = mapper.to_pixels(w_m / 2.0, h_m / 2.0)
+        c_px = stage_map.to_stage(*mapper.to_pixels(w_m / 2.0, h_m / 2.0))
         tag_col = C_PASS if in_pos else C_CYAN
-        cv2.circle(view, (int(round(c_px[0])), int(round(c_px[1]))), 6, tag_col, -1, cv2.LINE_AA)
-        cv2.putText(view, "STAND HERE", (int(round(c_px[0])) - 46, int(round(c_px[1])) + 4),
+        cv2.circle(view, c_px, 6, tag_col, -1, cv2.LINE_AA)
+        cv2.putText(view, "STAND HERE", (c_px[0] - 46, c_px[1] + 4),
                     FONT, 0.38, tag_col, 1, cv2.LINE_AA)
 
         # Player live feet markers on floor (L & R)
         if pf is not None:
             if getattr(pf, "left_foot_m", None):
-                lx, ly = mapper.to_pixels(*pf.left_foot_m)
-                cv2.circle(view, (int(round(lx)), int(round(ly))), 6, (255, 120, 0), -1, cv2.LINE_AA)
-                cv2.circle(view, (int(round(lx)), int(round(ly))), 8, (255, 255, 255), 1, cv2.LINE_AA)
-                cv2.putText(view, "L", (int(round(lx)) - 3, int(round(ly)) + 3), FONT, 0.32, (0, 0, 0), 1)
+                lx, ly = stage_map.to_stage(*mapper.to_pixels(*pf.left_foot_m))
+                cv2.circle(view, (lx, ly), 6, (255, 120, 0), -1, cv2.LINE_AA)
+                cv2.circle(view, (lx, ly), 8, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(view, "L", (lx - 3, ly + 3), FONT, 0.32, (0, 0, 0), 1)
             if getattr(pf, "right_foot_m", None):
-                rx, ry = mapper.to_pixels(*pf.right_foot_m)
-                cv2.circle(view, (int(round(rx)), int(round(ry))), 6, (255, 0, 255), -1, cv2.LINE_AA)
-                cv2.circle(view, (int(round(rx)), int(round(ry))), 8, (255, 255, 255), 1, cv2.LINE_AA)
-                cv2.putText(view, "R", (int(round(rx)) - 3, int(round(ry)) + 3), FONT, 0.32, (0, 0, 0), 1)
+                rx, ry = stage_map.to_stage(*mapper.to_pixels(*pf.right_foot_m))
+                cv2.circle(view, (rx, ry), 6, (255, 0, 255), -1, cv2.LINE_AA)
+                cv2.circle(view, (rx, ry), 8, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(view, "R", (rx - 3, ry + 3), FONT, 0.32, (0, 0, 0), 1)
 
     # 2. Oncoming Wall Approaching Border
     tmpl = state.current_template()
@@ -329,27 +360,23 @@ def render_stage_view(
     )
 
     # 3. Target Cut-Out Silhouette (Dashed Cyan/Neon Reference Wireframe)
-    # Compute reliable scale in pixels per metre from arena bounds
-    if mapper is not None:
-        pts = mapper.corners_px
-        w_near_px = math.hypot(pts[0][0] - pts[3][0], pts[0][1] - pts[3][1])
-        w_far_px = math.hypot(pts[1][0] - pts[2][0], pts[1][1] - pts[2][1])
-        scale_px_m = (w_near_px + w_far_px) / (2.0 * max(0.1, mapper.w_m))
-    else:
-        scale_px_m = 230.0
-
     ref_pts = make_template_ref_posture(tmpl.id)
     ref_px: list[tuple[int, int]] = []
     w_scale = 1.0 + 0.12 * approach_ratio
 
     # Center target silhouette above arena center if camera/mapper active, else screen center
-    if mapper is not None and frame is not None:
-        c_px = mapper.to_pixels(mapper.w_m / 2.0, mapper.h_m / 2.0)
-        cx = int(round(c_px[0]))
+    if mapper is not None and stage_map is not None:
+        pts = mapper.corners_px
+        w_near_px = math.hypot(pts[0][0] - pts[3][0], pts[0][1] - pts[3][1])
+        w_far_px = math.hypot(pts[1][0] - pts[2][0], pts[1][1] - pts[2][1])
+        scale_px_m = ((w_near_px + w_far_px) / (2.0 * max(0.1, mapper.w_m))) * stage_map.s
+        c_px = stage_map.to_stage(*mapper.to_pixels(mapper.w_m / 2.0, mapper.h_m / 2.0))
+        cx = c_px[0]
         cy = int(round(c_px[1] - 0.42 * scale_px_m))
         sil_w = scale_px_m * 1.05 * w_scale
         sil_h = scale_px_m * 1.55 * w_scale
     else:
+        scale_px_m = 230.0
         cx, cy = STAGE_W // 2, int(STAGE_H * 0.44)
         sil_w = STAGE_W * 0.72 * w_scale
         sil_h = STAGE_H * 0.68 * w_scale
@@ -369,94 +396,69 @@ def render_stage_view(
     cv2.addWeighted(silhouette_layer, 0.40, view, 0.60, 0, view)
 
     # 4. Draw Player Skeleton (Color-coded: Green = within tolerance, Red/Amber = adjust)
-    if player_pts and len(player_pts) >= 29:
-        player_px: list[tuple[int, int]] = []
-
-        # Check if 3D metric skeleton points from camera
-        is_3d_skel = False
-        if len(player_pts) > 0 and isinstance(player_pts[0], (tuple, list)) and len(player_pts[0]) >= 3:
-            if abs(player_pts[0][0]) < 2.5 and abs(player_pts[0][1]) < 2.5 and (abs(player_pts[0][2]) > 0.05 or any(abs(p[2]) > 0.1 for p in player_pts)):
-                is_3d_skel = True
-
-        if is_3d_skel:
-            # Determine real anchor pixel on screen
-            foot_anchor = None
-            if debug and debug.get("foot_px"):
-                foot_anchor = (float(debug["foot_px"][0]), float(debug["foot_px"][1]))
-            elif pf and getattr(pf, "floor_x_m", None) is not None and mapper is not None:
-                foot_anchor = mapper.to_pixels(pf.floor_x_m, pf.floor_y_m)
-            else:
-                foot_anchor = (float(cx), float(STAGE_H - 100))
-
-            # Compute reliable scale in pixels per metre from arena bounds
-            if mapper is not None:
-                pts = mapper.corners_px
-                w_near_px = math.hypot(pts[0][0] - pts[3][0], pts[0][1] - pts[3][1])
-                w_far_px = math.hypot(pts[1][0] - pts[2][0], pts[1][1] - pts[2][1])
-                scale_px_m = (w_near_px + w_far_px) / (2.0 * max(0.1, mapper.w_m))
-            else:
-                scale_px_m = 230.0
-
-            # Scale each 3D joint relative to foot anchor
-            fpx = pf.floor_x_m if (pf and getattr(pf, "floor_x_m", None) is not None) else 0.62
-            for lm in player_pts:
-                dx_m = lm[0] - fpx
-                dz_m = lm[2]
-                px = int(round(foot_anchor[0] + dx_m * scale_px_m))
-                py = int(round(foot_anchor[1] - dz_m * scale_px_m))
-                player_px.append((px, py))
-        else:
-            # 2D normalized points (keyboard mode)
-            for lm in player_pts:
-                if hasattr(lm, "x") and hasattr(lm, "y"):
-                    px = int(lm.x * STAGE_W)
-                    py = int(lm.y * STAGE_H)
-                elif isinstance(lm, (tuple, list)):
-                    rx, ry = lm[0], lm[1]
-                    px = int(cx + (rx - 0.5) * (STAGE_W * 0.72) * w_scale)
-                    py = int(cy + (ry - 0.5) * (STAGE_H * 0.68) * w_scale)
-                else:
-                    px, py = 0, 0
-                player_px.append((px, py))
-
-        def is_joint_ok(j_idx: int) -> bool:
-            """Unconstrained joints (Head, Hips, Wrists, Ankles) default to green unless requested."""
-            name_map = {
-                11: "left_shoulder",
-                12: "right_shoulder",
-                13: "left_elbow",
-                14: "right_elbow",
-                23: "left_hip",
-                24: "right_hip",
-                25: "left_knee",
-                26: "right_knee",
-            }
-            j_name = name_map.get(j_idx)
-            if j_name is None:
-                return True
-            if j_name in match_res.joint_results:
-                return match_res.joint_results[j_name].is_matched
+    def is_joint_ok(j_idx: int) -> bool:
+        """Unconstrained joints (Head, Hips, Wrists, Ankles) default to green unless requested."""
+        name_map = {
+            11: "left_shoulder",
+            12: "right_shoulder",
+            13: "left_elbow",
+            14: "right_elbow",
+            23: "left_hip",
+            24: "right_hip",
+            25: "left_knee",
+            26: "right_knee",
+        }
+        j_name = name_map.get(j_idx)
+        if j_name is None:
             return True
+        if j_name in match_res.joint_results:
+            return match_res.joint_results[j_name].is_matched
+        return True
 
-        # Draw bones
+    player_px: list[tuple[int, int]] = []
+    vis_list: list[float] = []
+
+    if debug and debug.get("landmarks_px") and len(debug["landmarks_px"]) >= 29 and stage_map is not None:
+        # Live camera mode: 2D image landmarks in frame pixels
+        for lm in debug["landmarks_px"]:
+            lx, ly = lm[0], lm[1]
+            lv = lm[2] if len(lm) >= 3 else 1.0
+            player_px.append(stage_map.to_stage(lx, ly))
+            vis_list.append(lv)
+    elif state.keyboard_mode and player_pts and len(player_pts) >= 29:
+        # Keyboard mode: synthetic 2D points centered in studio view
+        for lm in player_pts:
+            rx, ry = lm[0], lm[1]
+            px = int(cx + (rx - 0.5) * (STAGE_W * 0.72) * w_scale)
+            py = int(cy + (ry - 0.5) * (STAGE_H * 0.68) * w_scale)
+            player_px.append((px, py))
+            vis_list.append(1.0)
+
+    if player_px:
+        # Draw bones (visibility >= 0.5 for both joints)
         for j1, j2 in CORE_BONES:
             if j1 < len(player_px) and j2 < len(player_px):
-                p1, p2 = player_px[j1], player_px[j2]
-                if 0 <= p1[0] < STAGE_W and 0 <= p1[1] < STAGE_H and 0 <= p2[0] < STAGE_W and 0 <= p2[1] < STAGE_H:
-                    m1 = is_joint_ok(j1)
-                    m2 = is_joint_ok(j2)
-                    bone_col = C_PASS if (m1 and m2) else C_WARN
-                    cv2.line(view, p1, p2, bone_col, 3, cv2.LINE_AA)
+                v1 = vis_list[j1] if j1 < len(vis_list) else 1.0
+                v2 = vis_list[j2] if j2 < len(vis_list) else 1.0
+                if v1 >= 0.5 and v2 >= 0.5:
+                    p1, p2 = player_px[j1], player_px[j2]
+                    if 0 <= p1[0] < STAGE_W and 0 <= p1[1] < STAGE_H and 0 <= p2[0] < STAGE_W and 0 <= p2[1] < STAGE_H:
+                        m1 = is_joint_ok(j1)
+                        m2 = is_joint_ok(j2)
+                        bone_col = C_PASS if (m1 and m2) else C_WARN
+                        cv2.line(view, p1, p2, bone_col, 3, cv2.LINE_AA)
 
-        # Draw joints
+        # Draw joints (visibility >= 0.5)
         for idx in [0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]:
             if idx < len(player_px):
-                pt = player_px[idx]
-                if 0 <= pt[0] < STAGE_W and 0 <= pt[1] < STAGE_H:
-                    is_ok = is_joint_ok(idx)
-                    j_col = C_PASS if is_ok else C_FAIL
-                    cv2.circle(view, pt, 6, j_col, -1, cv2.LINE_AA)
-                    cv2.circle(view, pt, 8, (255, 255, 255), 1, cv2.LINE_AA)
+                v = vis_list[idx] if idx < len(vis_list) else 1.0
+                if v >= 0.5:
+                    pt = player_px[idx]
+                    if 0 <= pt[0] < STAGE_W and 0 <= pt[1] < STAGE_H:
+                        is_ok = is_joint_ok(idx)
+                        j_col = C_PASS if is_ok else C_FAIL
+                        cv2.circle(view, pt, 6, j_col, -1, cv2.LINE_AA)
+                        cv2.circle(view, pt, 8, (255, 255, 255), 1, cv2.LINE_AA)
 
     # 5. Top Guidance Banner & Per-Wall Result (Rule 3)
     if state.wall_state in ("PASSED", "MISSED"):
@@ -477,14 +479,6 @@ def render_stage_view(
     # Bottom Hold Progress Indicator on Stage
     hold_ratio = max(0.0, min(1.0, state.hold_elapsed_s / state.required_hold_s))
     cv2.rectangle(view, (16, STAGE_H - 28), (STAGE_W - 16, STAGE_H - 12), (30, 34, 44), -1)
-    bar_fill = int((STAGE_W - 32) * hold_ratio)
-    if bar_fill > 0:
-        bar_col = C_PASS if hold_ratio >= 1.0 else C_CYAN
-        cv2.rectangle(view, (16, STAGE_H - 28), (16 + bar_fill, STAGE_H - 12), bar_col, -1)
-    hold_txt = f"Hold: {state.hold_elapsed_s:.1f}s / {state.required_hold_s:.1f}s"
-    cv2.putText(view, hold_txt, (STAGE_W // 2 - 60, STAGE_H - 16), FONT, 0.38, C_TEXT_WHITE, 1, cv2.LINE_AA)
-
-    return view
     bar_fill = int((STAGE_W - 32) * hold_ratio)
     if bar_fill > 0:
         bar_col = C_PASS if hold_ratio >= 1.0 else C_CYAN
@@ -528,11 +522,18 @@ def render_sidebar_panel(
     cv2.rectangle(panel, (12, y), (SIDEBAR_W - 12, y + 74), C_BORDER, 1)
     cv2.putText(panel, "LIVE MATCH SCORE", (22, y + 20), FONT, 0.44, C_TEXT_GREY, 1, cv2.LINE_AA)
 
-    score_val = match_res.match_pct
-    score_col = C_PASS if score_val >= 80.0 else (C_WARN if score_val >= 60.0 else C_FAIL)
-    cv2.putText(panel, f"{score_val:4.1f}%", (22, y + 54), FONT, 0.95, score_col, 2, cv2.LINE_AA)
+    if match_res.reliable:
+        score_val = match_res.match_pct
+        score_col = C_PASS if score_val >= 80.0 else (C_WARN if score_val >= 60.0 else C_FAIL)
+        score_str = f"{score_val:4.1f}%"
+        match_status = "MATCH HOLD" if match_res.is_full_match else f"{match_res.matched_joints_count}/{match_res.total_joints_count} Joints OK"
+    else:
+        score_val = 0.0
+        score_col = C_TEXT_MUTED
+        score_str = "--"
+        match_status = "NOT TRACKED" if match_res.primary_hint == "Player not tracked" else "OUT OF VIEW"
 
-    match_status = "MATCH HOLD" if match_res.is_full_match else f"{match_res.matched_joints_count}/{match_res.total_joints_count} Joints OK"
+    cv2.putText(panel, score_str, (22, y + 54), FONT, 0.95, score_col, 2, cv2.LINE_AA)
     cv2.putText(panel, match_status, (150, y + 48), FONT, 0.42, score_col, 1, cv2.LINE_AA)
 
     # Score Gauge Bar
@@ -570,21 +571,28 @@ def render_sidebar_panel(
     cv2.rectangle(panel, (12, y), (SIDEBAR_W - 12, y + 180), C_BORDER, 1)
     cv2.putText(panel, "JOINT BREAKDOWN", (22, y + 18), FONT, 0.44, C_TEXT_GREY, 1, cv2.LINE_AA)
 
-    table_hdr = f"{'JOINT':<14} {'ACTUAL':>6} {'TARGET':>6} {'DIFF':>6} {'STATUS':>8}"
+    table_hdr = f"{'JOINT':<13} {'ACTUAL':>7} {'TARGET':>8} {'DIFF':>7}  {'STATUS':<11}"
     cv2.putText(panel, table_hdr, (20, y + 36), FONT, 0.33, C_TEXT_MUTED, 1, cv2.LINE_AA)
     cv2.line(panel, (18, y + 42), (SIDEBAR_W - 18, y + 42), C_BORDER, 1)
 
     row_y = y + 57
     for j_name, j_res in match_res.joint_results.items():
         disp_name = j_name.replace("_", " ").title()[:13]
-        act_s = f"{j_res.player_angle:5.0f} deg"
         tgt_s = f"{j_res.target_angle:5.0f} deg"
-        diff_s = f"{j_res.diff_deg:+5.0f} deg"
-        status_s = "PASS" if j_res.is_matched else "ADJ"
-        status_col = C_PASS if j_res.is_matched else C_WARN
+        if j_res.player_angle is None:
+            act_s = "   --  "
+            diff_s = "   -- "
+            status_s = "NOT VISIBLE"
+            row_col = C_TEXT_MUTED
+        else:
+            act_s = f"{j_res.player_angle:5.0f} deg"
+            diff_s = f"{j_res.diff_deg:+5.0f} deg" if j_res.diff_deg is not None else "   -- "
+            status_s = "PASS" if j_res.is_matched else "ADJ"
+            status_col = C_PASS if j_res.is_matched else C_WARN
+            row_col = status_col if not j_res.is_matched else C_TEXT_WHITE
 
         row_str = f"{disp_name:<13} {act_s} {tgt_s} {diff_s}  {status_s}"
-        cv2.putText(panel, row_str, (20, row_y), FONT, 0.32, status_col if not j_res.is_matched else C_TEXT_WHITE, 1, cv2.LINE_AA)
+        cv2.putText(panel, row_str, (20, row_y), FONT, 0.32, row_col, 1, cv2.LINE_AA)
         row_y += 18
 
     y += 192
@@ -615,15 +623,18 @@ def step_frame(
     mapper: FloorMapper | None = None,
     fps: float = 30.0,
     pose_fps: float = 30.0,
+    pf: PoseFrame | None = None,
+    debug: dict | None = None,
 ) -> tuple[np.ndarray, PoseMatchResult]:
     """Execute one simulation frame, update Wall Shape test state, and render canvas."""
     tmpl = state.current_template()
 
     # Determine player landmarks and position
-    pts_to_evaluate: Sequence[Any] | None = None
+    pts_to_evaluate: Any | None = None
     player_pos: tuple[float, float] | None = None
-    pf: PoseFrame | None = None
-    debug: dict = {}
+    player_tracked = False
+    if debug is None:
+        debug = {}
 
     if state.keyboard_mode:
         # Generate synthetic posture for keyboard mode
@@ -639,6 +650,7 @@ def step_frame(
         pf = PoseFrame(tracked=True, floor_x_m=state.kb_pos_m[0], floor_y_m=state.kb_pos_m[1],
                        left_foot_m=(state.kb_pos_m[0] - 0.1, state.kb_pos_m[1]),
                        right_foot_m=(state.kb_pos_m[0] + 0.1, state.kb_pos_m[1]))
+        player_tracked = True
     elif source is not None:
         # Pull live frame and landmarks from CameraPoseSource
         if hasattr(source, "snapshot3d"):
@@ -646,28 +658,44 @@ def step_frame(
             if frame is not None:
                 cam_frame = frame
             if skel and hasattr(skel, "points_m"):
-                pts_to_evaluate = skel.points_m
+                pts_to_evaluate = skel
             elif debug.get("pts"):
                 pts_to_evaluate = debug["pts"]
             if pf and getattr(pf, "tracked", False):
+                player_tracked = True
                 fx = getattr(pf, "floor_x_m", None)
                 fy = getattr(pf, "floor_y_m", None)
                 if fx is not None and fy is not None:
                     player_pos = (fx, fy)
     elif player_pts is not None:
         pts_to_evaluate = player_pts
+        if pf is not None:
+            player_tracked = bool(getattr(pf, "tracked", False))
+            fx = getattr(pf, "floor_x_m", None)
+            fy = getattr(pf, "floor_y_m", None)
+            if fx is not None and fy is not None:
+                player_pos = (fx, fy)
+        else:
+            player_tracked = True
 
-    # Extract angles and evaluate against active template
-    player_angles: dict[str, float] = {}
-    if pts_to_evaluate is not None and len(pts_to_evaluate) >= 29:
-        player_angles = extract_pose_angles(pts_to_evaluate)
+    # If player is not tracked, return untracked result without evaluating pose
+    if not player_tracked:
+        match_result = make_untracked_result(tmpl, hint="Player not tracked")
+    else:
+        player_angles: dict[str, float | None] = {}
+        if pts_to_evaluate is not None:
+            if hasattr(pts_to_evaluate, "points_m"):
+                player_angles = extract_angles_from_skeleton(pts_to_evaluate)
+            elif len(pts_to_evaluate) >= 29:
+                player_angles = extract_pose_angles(pts_to_evaluate)
 
-    match_result = evaluate_pose(
-        player_angles=player_angles,
-        player_pos_m=player_pos,
-        template=tmpl,
-        angle_tolerance_override=state.angle_tolerance_deg,
-    )
+        match_result = evaluate_pose(
+            player_angles=player_angles,
+            player_pos_m=player_pos,
+            template=tmpl,
+            angle_tolerance_override=state.angle_tolerance_deg,
+            player_tracked=player_tracked,
+        )
 
     # Update Wall Shape test engine
     state.update(dt, match_result)
@@ -735,6 +763,7 @@ def main() -> None:
 
     last_time = time.monotonic()
     fps = 30.0
+    calib_warned = False
 
     try:
         while True:
@@ -746,6 +775,21 @@ def main() -> None:
 
             pose_fps = source.pose_fps if source else (fps if state.keyboard_mode else 0.0)
             canvas, res = step_frame(state, dt, source=source, mapper=mapper, fps=fps, pose_fps=pose_fps)
+
+            # Check calibration fit once when camera frame is available
+            if not calib_warned and source is not None and mapper is not None:
+                cam_f = getattr(source, "latest_frame", lambda: None)()
+                if cam_f is not None:
+                    calib_warned = True
+                    fh, fw = cam_f.shape[:2]
+                    print(f"Camera frame size: {fw}x{fh}")
+                    corners = mapper.corners_px
+                    out_of_bounds = any(
+                        x < 0 or y < 0 or x >= fw or y >= fh
+                        for x, y in corners
+                    )
+                    if out_of_bounds:
+                        print("WARNING: calibration does not fit this camera frame (different resolution or camera moved). Run: python -m tools.calibrate_floor")
 
             if args.headless:
                 time.sleep(0.03)

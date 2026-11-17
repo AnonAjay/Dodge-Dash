@@ -21,15 +21,18 @@ import numpy as np
 # Vector Mathematics
 # ==============================================================================
 
-def angle_between_vectors(v1: Sequence[float], v2: Sequence[float]) -> float:
-    """Calculate the interior angle (in degrees, 0..180) between two 2D or 3D vectors."""
+def angle_between_vectors(v1: Sequence[float], v2: Sequence[float]) -> float | None:
+    """Calculate the interior angle (in degrees, 0..180) between two 2D or 3D vectors.
+
+    Returns None for (near) zero-length vectors.
+    """
     a = np.asarray(v1, dtype=np.float64)
     b = np.asarray(v2, dtype=np.float64)
 
     norm_a = float(np.linalg.norm(a))
     norm_b = float(np.linalg.norm(b))
     if norm_a < 1e-7 or norm_b < 1e-7:
-        return 0.0
+        return None
 
     dot = float(np.dot(a, b))
     cos_theta = dot / (norm_a * norm_b)
@@ -38,11 +41,13 @@ def angle_between_vectors(v1: Sequence[float], v2: Sequence[float]) -> float:
 
 
 def angle_3pts(
-    pt_a: Sequence[float],
-    pt_vertex_b: Sequence[float],
-    pt_c: Sequence[float],
-) -> float:
+    pt_a: Sequence[float] | None,
+    pt_vertex_b: Sequence[float] | None,
+    pt_c: Sequence[float] | None,
+) -> float | None:
     """Calculate interior angle at vertex B formed by line segments B->A and B->C."""
+    if pt_a is None or pt_vertex_b is None or pt_c is None:
+        return None
     va = [a - b for a, b in zip(pt_a, pt_vertex_b)]
     vc = [c - b for c, b in zip(pt_c, pt_vertex_b)]
     return angle_between_vectors(va, vc)
@@ -76,66 +81,97 @@ def _get_coord(lm: Any) -> tuple[float, float, float]:
     return (0.0, 0.0, 0.0)
 
 
-def extract_pose_angles(landmarks: Sequence[Any]) -> dict[str, float]:
+def _get_vis(lm: Any, idx: int, visibility: Sequence[float] | None) -> float:
+    """Extract visibility score (0..1) for a landmark."""
+    if visibility is not None:
+        if idx < len(visibility):
+            return float(visibility[idx])
+        return 0.0
+    if hasattr(lm, "visibility"):
+        return float(getattr(lm, "visibility"))
+    if isinstance(lm, dict) and "visibility" in lm:
+        return float(lm["visibility"])
+    if isinstance(lm, (tuple, list)) and len(lm) >= 3:
+        # Check if 3rd element could be visibility (0..1)
+        # However, for 3D coordinates z is typically metric, so only use if explicit visibility or hasattr
+        pass
+    return 1.0
+
+
+def extract_pose_angles(
+    landmarks: Sequence[Any],
+    visibility: Sequence[float] | None = None,
+    min_vis: float = 0.5,
+) -> dict[str, float | None]:
     """Extract all frontal joint angles in degrees (0..180) from a 33-point landmark list.
 
     Works identically with MediaPipe normalized landmarks, pixel landmarks, or Skeleton3D points.
+    Returns None for any joint whose landmarks have visibility < min_vis or cannot be computed.
     """
     if len(landmarks) < 29:
         return {}
 
-    # Extract coordinates
-    ls = _get_coord(landmarks[L_SHOULDER])
-    rs = _get_coord(landmarks[R_SHOULDER])
-    le = _get_coord(landmarks[L_ELBOW])
-    re = _get_coord(landmarks[R_ELBOW])
-    lw = _get_coord(landmarks[L_WRIST])
-    rw = _get_coord(landmarks[R_WRIST])
-    lh = _get_coord(landmarks[L_HIP])
-    rh = _get_coord(landmarks[R_HIP])
-    lk = _get_coord(landmarks[L_KNEE])
-    rk = _get_coord(landmarks[R_KNEE])
-    la = _get_coord(landmarks[L_ANKLE])
-    ra = _get_coord(landmarks[R_ANKLE])
+    def joint_ang(p1_idx: int, vertex_idx: int, p2_idx: int) -> float | None:
+        v1 = _get_vis(landmarks[p1_idx], p1_idx, visibility)
+        v2 = _get_vis(landmarks[vertex_idx], vertex_idx, visibility)
+        v3 = _get_vis(landmarks[p2_idx], p2_idx, visibility)
+        if v1 < min_vis or v2 < min_vis or v3 < min_vis:
+            return None
+        p1 = _get_coord(landmarks[p1_idx])
+        pv = _get_coord(landmarks[vertex_idx])
+        p2 = _get_coord(landmarks[p2_idx])
+        ang = angle_3pts(p1, pv, p2)
+        return round(ang, 1) if ang is not None else None
 
     # 1. Elbow angles (forearm relative to upper arm: 180 = straight, 90 = bent)
-    left_elbow = angle_3pts(ls, le, lw)
-    right_elbow = angle_3pts(rs, re, rw)
+    left_elbow = joint_ang(L_SHOULDER, L_ELBOW, L_WRIST)
+    right_elbow = joint_ang(R_SHOULDER, R_ELBOW, R_WRIST)
 
     # 2. Shoulder angles (upper arm relative to torso spine: 0 = down, 90 = T-pose, 180 = overhead)
-    left_shoulder = angle_3pts(lh, ls, le)
-    right_shoulder = angle_3pts(rh, rs, re)
+    left_shoulder = joint_ang(L_HIP, L_SHOULDER, L_ELBOW)
+    right_shoulder = joint_ang(R_HIP, R_SHOULDER, R_ELBOW)
 
     # 3. Knee angles (lower leg relative to thigh: 180 = straight, 90 = bent)
-    left_knee = angle_3pts(lh, lk, la)
-    right_knee = angle_3pts(rh, rk, ra)
+    left_knee = joint_ang(L_HIP, L_KNEE, L_ANKLE)
+    right_knee = joint_ang(R_HIP, R_KNEE, R_ANKLE)
 
     # 4. Hip angles (thigh relative to torso: 180 = straight standing, 90 = squat/seated)
-    left_hip = angle_3pts(ls, lh, lk)
-    right_hip = angle_3pts(rs, rh, rk)
+    left_hip = joint_ang(L_SHOULDER, L_HIP, L_KNEE)
+    right_hip = joint_ang(R_SHOULDER, R_HIP, R_KNEE)
 
     # 5. Torso spine inclination (angle of spine vector relative to vertical)
-    # Hip midpoint to shoulder midpoint
-    dx = (ls[0] + rs[0]) / 2.0 - (lh[0] + rh[0]) / 2.0
-    if abs(ls[2]) > 0.05 or abs(lh[2]) > 0.05:
-        # 3D floor coordinates: Z is vertical height (upward is positive)
-        dz = (ls[2] + rs[2]) / 2.0 - (lh[2] + rh[2]) / 2.0
-        torso_tilt = angle_between_vectors((dx, dz), (0.0, 1.0))
+    ls_vis = _get_vis(landmarks[L_SHOULDER], L_SHOULDER, visibility)
+    rs_vis = _get_vis(landmarks[R_SHOULDER], R_SHOULDER, visibility)
+    lh_vis = _get_vis(landmarks[L_HIP], L_HIP, visibility)
+    rh_vis = _get_vis(landmarks[R_HIP], R_HIP, visibility)
+    if ls_vis < min_vis or rs_vis < min_vis or lh_vis < min_vis or rh_vis < min_vis:
+        torso_tilt = None
     else:
-        # 2D image coordinates: Y is vertical downwards (upward is negative)
-        dy = (ls[1] + rs[1]) / 2.0 - (lh[1] + rh[1]) / 2.0
-        torso_tilt = angle_between_vectors((dx, dy), (0.0, -1.0))
+        ls = _get_coord(landmarks[L_SHOULDER])
+        rs = _get_coord(landmarks[R_SHOULDER])
+        lh = _get_coord(landmarks[L_HIP])
+        rh = _get_coord(landmarks[R_HIP])
+        dx = (ls[0] + rs[0]) / 2.0 - (lh[0] + rh[0]) / 2.0
+        if abs(ls[2]) > 0.05 or abs(lh[2]) > 0.05:
+            # 3D floor coordinates: Z is vertical height (upward is positive)
+            dz = (ls[2] + rs[2]) / 2.0 - (lh[2] + rh[2]) / 2.0
+            ang = angle_between_vectors((dx, dz), (0.0, 1.0))
+        else:
+            # 2D image coordinates: Y is vertical downwards (upward is negative)
+            dy = (ls[1] + rs[1]) / 2.0 - (lh[1] + rh[1]) / 2.0
+            ang = angle_between_vectors((dx, dy), (0.0, -1.0))
+        torso_tilt = round(ang, 1) if ang is not None else None
 
     return {
-        "left_elbow": round(left_elbow, 1),
-        "right_elbow": round(right_elbow, 1),
-        "left_shoulder": round(left_shoulder, 1),
-        "right_shoulder": round(right_shoulder, 1),
-        "left_knee": round(left_knee, 1),
-        "right_knee": round(right_knee, 1),
-        "left_hip": round(left_hip, 1),
-        "right_hip": round(right_hip, 1),
-        "torso_tilt": round(torso_tilt, 1),
+        "left_elbow": left_elbow,
+        "right_elbow": right_elbow,
+        "left_shoulder": left_shoulder,
+        "right_shoulder": right_shoulder,
+        "left_knee": left_knee,
+        "right_knee": right_knee,
+        "left_hip": left_hip,
+        "right_hip": right_hip,
+        "torso_tilt": torso_tilt,
     }
 
 
@@ -146,9 +182,9 @@ def extract_pose_angles(landmarks: Sequence[Any]) -> dict[str, float]:
 @dataclass
 class JointComparison:
     name: str
-    player_angle: float
+    player_angle: float | None
     target_angle: float
-    diff_deg: float
+    diff_deg: float | None
     is_matched: bool
     hint: str
 
@@ -176,6 +212,8 @@ class PoseMatchResult:
     matched_joints_count: int = 0
     total_joints_count: int = 0
     primary_hint: str = ""
+    coverage: float = 1.0                            # visible joints / expected joints, 0.0..1.0
+    reliable: bool = True                            # coverage >= 0.7 and player_tracked
 
 
 # Default Wall Shape Catalog (Frontal, scale-invariant poses)
@@ -309,16 +347,45 @@ DEFAULT_TEMPLATES: list[PoseTemplate] = [
 ]
 
 
+def make_untracked_result(template: PoseTemplate, hint: str = "Player not tracked") -> PoseMatchResult:
+    """Return an unreliable result with coverage=0.0 and all joint actuals None."""
+    joint_results: dict[str, JointComparison] = {}
+    for j_name, tgt_angle in template.expected_angles.items():
+        joint_results[j_name] = JointComparison(
+            name=j_name,
+            player_angle=None,
+            target_angle=tgt_angle,
+            diff_deg=None,
+            is_matched=False,
+            hint="not visible",
+        )
+    return PoseMatchResult(
+        match_pct=0.0,
+        is_full_match=False,
+        angle_score_pct=0.0,
+        pos_score_pct=0.0,
+        pos_matched=False,
+        pos_dist_m=0.0,
+        joint_results=joint_results,
+        matched_joints_count=0,
+        total_joints_count=len(template.expected_angles),
+        primary_hint=hint,
+        coverage=0.0,
+        reliable=False,
+    )
+
+
 def evaluate_pose(
-    player_angles: dict[str, float],
+    player_angles: dict[str, float | None],
     player_pos_m: tuple[float, float] | None,
     template: PoseTemplate,
     angle_tolerance_override: float | None = None,
     pos_tolerance_override: float | None = None,
+    player_tracked: bool = True,
 ) -> PoseMatchResult:
     """Compare player joint angles and floor position against a Wall Shape template.
 
-    Returns detailed JointComparison metrics, similarity scores (0..100%), and guidance hints.
+    Returns detailed JointComparison metrics, similarity scores (0..100%), coverage, and guidance hints.
     """
     angle_tol = angle_tolerance_override if angle_tolerance_override is not None else template.angle_tolerance_deg
     pos_tol = pos_tolerance_override if pos_tolerance_override is not None else template.pos_tolerance_m
@@ -327,8 +394,23 @@ def evaluate_pose(
     joint_scores: list[float] = []
     hints: list[str] = []
 
+    total_expected = len(template.expected_angles)
+    visible_count = 0
+
     for j_name, tgt_angle in template.expected_angles.items():
-        act_angle = player_angles.get(j_name, 0.0)
+        act_angle = player_angles.get(j_name)
+        if act_angle is None:
+            joint_results[j_name] = JointComparison(
+                name=j_name,
+                player_angle=None,
+                target_angle=tgt_angle,
+                diff_deg=None,
+                is_matched=False,
+                hint="not visible",
+            )
+            continue
+
+        visible_count += 1
         diff = abs(act_angle - tgt_angle)
         is_matched = diff <= angle_tol
 
@@ -364,8 +446,12 @@ def evaluate_pose(
         )
 
     matched_count = sum(1 for j in joint_results.values() if j.is_matched)
-    total_count = len(joint_results)
+    total_count = total_expected
     angle_score_pct = float(np.mean(joint_scores)) if joint_scores else 0.0
+
+    # Coverage and reliability
+    coverage = round(visible_count / total_count, 3) if total_count > 0 else 0.0
+    reliable = (coverage >= 0.7) and bool(player_tracked)
 
     # Position evaluation
     pos_dist = 0.0
@@ -392,20 +478,23 @@ def evaluate_pose(
             pos_score_pct = 0.0
             hints.insert(0, "Position: Step inside arena")
 
-    # Overall Combined Match Percentage
-    if template.target_pos_m is not None:
-        match_pct = round(0.75 * angle_score_pct + 0.25 * pos_score_pct, 1)
+    if not reliable:
+        is_full_match = False
+        # match_pct computed over visible joints only (or 0.0 if none)
+        match_pct = round(angle_score_pct, 1) if joint_scores else 0.0
+        primary_hint = "Player not tracked" if not player_tracked else "Show your whole body (head to feet)"
     else:
-        match_pct = round(angle_score_pct, 1)
+        # Overall Combined Match Percentage
+        if template.target_pos_m is not None:
+            match_pct = round(0.75 * angle_score_pct + 0.25 * pos_score_pct, 1)
+        else:
+            match_pct = round(angle_score_pct, 1)
 
-    # Full match threshold: player is in position, and either:
-    # 1. All joints matched with angle score >= 75%, OR
-    # 2. At most 1 minor joint slightly off with overall match score >= 80% (robust against webcam jitter)
-    is_full_match = pos_matched and (
-        (matched_count == total_count and match_pct >= 75.0) or
-        (matched_count >= max(1, total_count - 1) and match_pct >= 80.0)
-    )
-    primary_hint = hints[0] if hints else "PERFECT POSE!"
+        is_full_match = pos_matched and (
+            (matched_count == total_count and match_pct >= 75.0) or
+            (matched_count >= max(1, total_count - 1) and match_pct >= 80.0)
+        )
+        primary_hint = hints[0] if hints else "PERFECT POSE!"
 
     return PoseMatchResult(
         match_pct=match_pct,
@@ -418,6 +507,8 @@ def evaluate_pose(
         matched_joints_count=matched_count,
         total_joints_count=total_count,
         primary_hint=primary_hint,
+        coverage=coverage,
+        reliable=reliable,
     )
 
 
@@ -425,7 +516,7 @@ def evaluate_pose(
 # Non-Breaking Integration Helpers (for Station B and Test Tools)
 # ==============================================================================
 
-def extract_angles_from_skeleton(skeleton: Any) -> dict[str, float]:
+def extract_angles_from_skeleton(skeleton: Any) -> dict[str, float | None]:
     """Extract joint angles directly from a Skeleton3D or list of 33 landmarks.
 
     Scale- and position-invariant; works with metric 3D skeleton points,
@@ -434,7 +525,8 @@ def extract_angles_from_skeleton(skeleton: Any) -> dict[str, float]:
     if skeleton is None:
         return {}
     if hasattr(skeleton, "points_m"):
-        return extract_pose_angles(skeleton.points_m)
+        vis = getattr(skeleton, "visibility", None)
+        return extract_pose_angles(skeleton.points_m, visibility=vis)
     if isinstance(skeleton, (list, tuple)):
         return extract_pose_angles(skeleton)
     return {}
@@ -473,12 +565,16 @@ def snapshot_pose_match(
         skel = skel_fn() if callable(skel_fn) else None
         angles = extract_angles_from_skeleton(skel)
 
+    player_tracked = bool(pf and getattr(pf, "tracked", False))
+    if not player_tracked:
+        result = make_untracked_result(template, hint="Player not tracked")
+        return result, pf, frame, debug
+
     player_pos = None
-    if pf and getattr(pf, "tracked", False):
-        fx = getattr(pf, "floor_x_m", None)
-        fy = getattr(pf, "floor_y_m", None)
-        if fx is not None and fy is not None:
-            player_pos = (fx, fy)
+    fx = getattr(pf, "floor_x_m", None)
+    fy = getattr(pf, "floor_y_m", None)
+    if fx is not None and fy is not None:
+        player_pos = (fx, fy)
 
     result = evaluate_pose(
         player_angles=angles,
@@ -486,6 +582,7 @@ def snapshot_pose_match(
         template=template,
         angle_tolerance_override=angle_tolerance_override,
         pos_tolerance_override=pos_tolerance_override,
+        player_tracked=player_tracked,
     )
     return result, pf, frame, debug
 
