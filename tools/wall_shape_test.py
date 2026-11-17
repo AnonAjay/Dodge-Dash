@@ -58,8 +58,10 @@ C_PASS = (0, 230, 115)         # Neon Green
 C_WARN = (0, 170, 255)         # Bright Amber / Orange
 C_FAIL = (60, 60, 240)         # Crimson Red
 C_CYAN = (255, 225, 0)         # Cyan (BGR)
-C_WALL_ACCENT = (255, 210, 40) # Glowing Cyan/Sky Blue
-C_WALL_FILL = (35, 45, 60)     # Translucent Wall Tint
+C_WALL_NAVY = (128, 28, 10)    # Bold Dark Navy Blue (BGR)
+C_WALL_BLACK = (16, 16, 20)    # Deep Black outline (BGR)
+C_WALL_ACCENT = C_WALL_NAVY     # Darker, bolder wall border
+C_WALL_FILL = (20, 24, 35)     # Translucent Dark Wall Tint
 
 # Standard MediaPipe Joint Indices
 L_SHOULDER, R_SHOULDER = 11, 12
@@ -350,16 +352,25 @@ def render_stage_view(
         STAGE_W - 2 * (depth_pad_x + 10),
         STAGE_H - 2 * (depth_pad_y + 10),
     )
+    # Bolder oncoming wall border (outer dark contour + navy blue frame)
     cv2.rectangle(
         view,
         (wall_box[0], wall_box[1]),
         (wall_box[0] + wall_box[2], wall_box[1] + wall_box[3]),
-        C_WALL_ACCENT,
-        2,
+        C_WALL_BLACK,
+        5,
+        cv2.LINE_AA,
+    )
+    cv2.rectangle(
+        view,
+        (wall_box[0], wall_box[1]),
+        (wall_box[0] + wall_box[2], wall_box[1] + wall_box[3]),
+        C_WALL_NAVY,
+        3,
         cv2.LINE_AA,
     )
 
-    # 3. Target Cut-Out Silhouette (Dashed Cyan/Neon Reference Wireframe)
+    # 3. Target Cut-Out Silhouette (Bold Dark Navy Blue & Black Reference Wireframe)
     ref_pts = make_template_ref_posture(tmpl.id)
     ref_px: list[tuple[int, int]] = []
     w_scale = 1.0 + 0.12 * approach_ratio
@@ -386,14 +397,14 @@ def render_stage_view(
         py = int(cy + (ry - 0.5) * sil_h)
         ref_px.append((px, py))
 
-    # Draw target cut-out bones (Translucent thick silhouette)
-    silhouette_layer = view.copy()
+    # Draw target cut-out bones (Crisp bold dark silhouette: black outline + navy blue core)
     for j1, j2 in CORE_BONES:
         if j1 < len(ref_px) and j2 < len(ref_px):
-            cv2.line(silhouette_layer, ref_px[j1], ref_px[j2], C_CYAN, 8, cv2.LINE_AA)
+            cv2.line(view, ref_px[j1], ref_px[j2], C_WALL_BLACK, 10, cv2.LINE_AA)
+            cv2.line(view, ref_px[j1], ref_px[j2], C_WALL_NAVY, 6, cv2.LINE_AA)
     for px, py in ref_px:
-        cv2.circle(silhouette_layer, (px, py), 6, C_CYAN, -1, cv2.LINE_AA)
-    cv2.addWeighted(silhouette_layer, 0.40, view, 0.60, 0, view)
+        cv2.circle(view, (px, py), 8, C_WALL_BLACK, -1, cv2.LINE_AA)
+        cv2.circle(view, (px, py), 6, C_WALL_NAVY, -1, cv2.LINE_AA)
 
     # 4. Draw Player Skeleton (Color-coded: Green = within tolerance, Red/Amber = adjust)
     def is_joint_ok(j_idx: int) -> bool:
