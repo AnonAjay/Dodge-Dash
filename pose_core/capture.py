@@ -20,6 +20,7 @@ import numpy as np
 
 from pose_core.floor_map import FloorMapper
 from pose_core.landmarks import JumpDetector, feet_info
+from pose_core.skeleton import Skeleton3D, SkeletonBuilder
 from shared.contracts import PoseFrame
 
 # ---- tunables ----------------------------------------------------------------
@@ -73,6 +74,8 @@ class PoseTracker:
         self.last_pf: PoseFrame | None = None
         self.last_good_ts: float | None = None
         self.debug: dict = {}
+        self.skeleton: Skeleton3D | None = None
+        self.skeleton_builder = SkeletonBuilder()
 
     def _smooth(self, key: str, px):
         px = np.asarray(px, dtype=float)
@@ -83,17 +86,20 @@ class PoseTracker:
             self.sm[key] = SMOOTH_ALPHA * px + (1 - SMOOTH_ALPHA) * prev
         return self.sm[key]
 
-    def update(self, people, img_w: int, img_h: int, ts: float) -> PoseFrame:
-        self.debug = {"foot_px": None, "pts": [], "lift": 0.0, "body_ok": False}
+    def update(self, people, img_w: int, img_h: int, ts: float,
+               world_people: list | None = None) -> PoseFrame:
+        self.debug = {"foot_px": None, "pts": [], "lift": 0.0, "body_ok": False, "landmarks_px": []}
 
         cands = []
-        for lms in people:
+        for idx, lms in enumerate(people):
             c = feet_info(lms, img_w, img_h)
             if c is None:
                 continue
             fx, fy = self.mapper.to_floor(*c["centre_px"])
             dist = math.hypot(fx - self.last_floor[0], fy - self.last_floor[1])
             c["rank"] = (0 if self.mapper.inside(fx, fy) else 1, dist)  # in the box first, then nearest
+            c["idx"] = idx
+            c["lms"] = lms
             cands.append(c)
 
         if not cands:
@@ -101,7 +107,11 @@ class PoseTracker:
             self.jump.reset()
             if self.last_pf is not None and self.last_good_ts is not None \
                     and ts - self.last_good_ts < LOST_GRACE_S:
+                if self.skeleton is not None:
+                    self.skeleton = replace(self.skeleton, timestamp=ts)
                 return replace(self.last_pf, timestamp=ts, airborne=False)  # short blink-out: hold
+            self.skeleton = None
+            self.skeleton_builder.reset()
             return PoseFrame(timestamp=ts)  # tracked=False, no position
 
         c = min(cands, key=lambda k: k["rank"])
@@ -127,11 +137,25 @@ class PoseTracker:
             self.grounded = (pos, lf, rf)
         self.last_floor = pos
 
+        selected_idx = c["idx"]
+        if world_people is not None and selected_idx < len(world_people):
+            world_lms = world_people[selected_idx]
+            self.skeleton = self.skeleton_builder.build(
+                world_lms,
+                pos,
+                hip_lift=self.jump.hip_lift,
+                ts=ts,
+                is_jumping=(airborne or self.jump.rising),
+            )
+        else:
+            self.skeleton = None
+
         pf = PoseFrame(timestamp=ts, tracked=True, floor_x_m=pos[0], floor_y_m=pos[1],
                        left_foot_m=lf, right_foot_m=rf, arms_up=c["arms_up"], airborne=airborne)
         self.last_pf, self.last_good_ts = pf, ts
+        landmarks_px = [(l.x * img_w, l.y * img_h, getattr(l, "visibility", 1.0)) for l in c["lms"]]
         self.debug = {"foot_px": tuple(centre), "pts": c["pts"], "lift": lift,
-                      "body_ok": c["torso"] is not None}
+                      "body_ok": c["torso"] is not None, "landmarks_px": landmarks_px}
         return pf
 
 
@@ -146,6 +170,7 @@ class CameraPoseSource:
         self.model_path = model_path
         self._lock = threading.Lock()
         self._latest = PoseFrame()
+        self._latest_skeleton: Skeleton3D | None = None
         self._frame = None
         self._debug: dict = {}
         self._pending = mapper          # applied inside the thread
@@ -171,6 +196,10 @@ class CameraPoseSource:
     def latest(self) -> PoseFrame:
         with self._lock:
             return self._latest
+
+    def latest_skeleton(self) -> Skeleton3D | None:
+        with self._lock:
+            return self._latest_skeleton
 
     def stop(self) -> None:
         self._running = False
@@ -200,6 +229,12 @@ class CameraPoseSource:
             frame = None if self._frame is None else self._frame.copy()
             return self._latest, frame, dict(self._debug)
 
+    def snapshot3d(self):
+        """(PoseFrame, Skeleton3D or None, camera frame or None, debug dict), all from the same moment."""
+        with self._lock:
+            frame = None if self._frame is None else self._frame.copy()
+            return self._latest, self._latest_skeleton, frame, dict(self._debug)
+
     def latest_frame(self):
         with self._lock:
             return None if self._frame is None else self._frame.copy()
@@ -224,7 +259,8 @@ class CameraPoseSource:
         img = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
         ms = max(int(ts * 1000), self._last_ms + 1)  # must keep increasing
         self._last_ms = ms
-        return self._landmarker.detect_for_video(img, ms).pose_landmarks
+        res = self._landmarker.detect_for_video(img, ms)
+        return res.pose_landmarks, res.pose_world_landmarks
 
     def _run(self):
         last = time.monotonic()
@@ -238,16 +274,17 @@ class CameraPoseSource:
             try:
                 self._apply_pending()
                 if self._tracker is not None:
-                    people = self._detect(frame, ts)
-                    pf = self._tracker.update(people, frame.shape[1], frame.shape[0], ts)
+                    people, world_people = self._detect(frame, ts)
+                    pf = self._tracker.update(people, frame.shape[1], frame.shape[0], ts, world_people=world_people)
+                    skel = self._tracker.skeleton
                     debug = dict(self._tracker.debug)
                 else:
-                    pf, debug = PoseFrame(timestamp=ts), {}
+                    pf, skel, debug = PoseFrame(timestamp=ts), None, {}
             except Exception as e:  # keep the thread alive, report the problem
                 self.error = f"{type(e).__name__}: {e}"
-                pf, debug = PoseFrame(timestamp=ts), {}
+                pf, skel, debug = PoseFrame(timestamp=ts), None, {}
             with self._lock:
-                self._latest, self._frame, self._debug = pf, frame, debug
+                self._latest, self._latest_skeleton, self._frame, self._debug = pf, skel, frame, debug
             dt = ts - last
             last = ts
             if dt > 0:

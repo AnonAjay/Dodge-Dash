@@ -16,3 +16,6 @@ recordings/
 .pytest_cache/
 .pytest_tmp/
 learning.md
+tools/skeleton3d_test.py
+VISION_AND_FLOOR_GEOMETRY_GUIDE.md
+
