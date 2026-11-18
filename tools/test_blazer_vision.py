@@ -121,13 +121,15 @@ def main() -> None:
             if hasattr(provider, "snapshot"):
                 pose, cam_frame, debug_info = provider.snapshot()
                 if debug_info and "landmarks_px" in debug_info and len(debug_info["landmarks_px"]) > 0:
-                    player_angles = extract_pose_angles(debug_info["landmarks_px"])
+                    cw = cam_frame.shape[1] if cam_frame is not None else 640
+                    ch = cam_frame.shape[0] if cam_frame is not None else 480
+                    norm_lms = [(float(lm[0]) / cw, float(lm[1]) / ch) for lm in debug_info["landmarks_px"]]
+                    player_angles = extract_pose_angles(norm_lms, mirrored=True, planar_2d=True)
                     lm0 = debug_info["landmarks_px"][0]
                     hx, hy = float(lm0[0]), float(lm0[1])
                     hvis = float(lm0[2]) if len(lm0) > 2 else 1.0
                     if cam_frame is not None and hvis > 0.35:
-                        h, w = cam_frame.shape[:2]
-                        player_head_norm = (hx / w, hy / h)
+                        player_head_norm = (hx / cw, hy / ch)
             else:
                 pose = provider.latest()
 
@@ -216,14 +218,72 @@ def _render_live_hud(
     # 2. Player skeleton overlay with color-coded joints
     if debug_info and "landmarks_px" in debug_info and len(debug_info["landmarks_px"]) >= 29:
         lms = debug_info["landmarks_px"]
-        pts = [(int(lm[0] * w / 640), int(lm[1] * h / 480)) for lm in lms]
+        cw = 640
+        ch = 480
+        pts = [(int(float(lm[0]) * w / cw), int(float(lm[1]) * h / ch)) for lm in lms]
 
+        # Map landmarks to joint names in mirrored screen-space
+        lm_to_joint = {
+            12: "left_shoulder",
+            14: "left_elbow",
+            16: "left_elbow",
+            11: "right_shoulder",
+            13: "right_elbow",
+            15: "right_elbow",
+            24: "left_hip",
+            26: "left_knee",
+            28: "left_knee",
+            23: "right_hip",
+            25: "right_knee",
+            27: "right_knee",
+        }
+
+        # Bone to joint mapping for color coding limbs
+        bone_to_joint = {
+            (12, 14): "left_shoulder",
+            (14, 16): "left_elbow",
+            (11, 13): "right_shoulder",
+            (13, 15): "right_elbow",
+            (24, 26): "left_hip",
+            (26, 28): "left_knee",
+            (23, 25): "right_hip",
+            (25, 27): "right_knee",
+        }
+
+        joint_cols = res.joint_colors_bgr if res and hasattr(res, "joint_colors_bgr") else {}
+        joint_statuses = res.joint_status if res and hasattr(res, "joint_status") else {}
+
+        # Draw bones with dynamic joint colors
         for j1, j2 in BONES:
             if j1 < len(pts) and j2 < len(pts):
-                cv2.line(canvas, pts[j1], pts[j2], (180, 180, 180), 2, cv2.LINE_AA)
+                p1, p2 = pts[j1], pts[j2]
+                assoc_joint = bone_to_joint.get((j1, j2), bone_to_joint.get((j2, j1)))
+                if assoc_joint and assoc_joint in joint_cols:
+                    b_col = joint_cols[assoc_joint]
+                    is_matched = joint_statuses.get(assoc_joint) == "matched"
+                    thick = 4 if is_matched else 2
+                    cv2.line(canvas, p1, p2, (20, 20, 20), thick + 2, cv2.LINE_AA)
+                    cv2.line(canvas, p1, p2, b_col, thick, cv2.LINE_AA)
+                else:
+                    t_col = C_NEON_GREEN_BGR if is_head_ok else (120, 140, 160)
+                    cv2.line(canvas, p1, p2, t_col, 2, cv2.LINE_AA)
 
-        for px, py in pts:
-            cv2.circle(canvas, (px, py), 5, (255, 255, 0), -1, cv2.LINE_AA)
+        # Draw joint circles with halo feedback
+        for idx, (px, py) in enumerate(pts[:29]):
+            assoc_joint = lm_to_joint.get(idx)
+            if assoc_joint and assoc_joint in joint_cols:
+                col = joint_cols[assoc_joint]
+                stat = joint_statuses.get(assoc_joint, "off")
+                if stat == "matched":
+                    # Glowing neon green halo for matched joints
+                    cv2.circle(canvas, (px, py), 9, C_NEON_GREEN_BGR, 2, cv2.LINE_AA)
+                    cv2.circle(canvas, (px, py), 5, (255, 255, 255), -1, cv2.LINE_AA)
+                elif stat == "close":
+                    cv2.circle(canvas, (px, py), 6, col, -1, cv2.LINE_AA)
+                else:
+                    cv2.circle(canvas, (px, py), 5, col, -1, cv2.LINE_AA)
+            else:
+                cv2.circle(canvas, (px, py), 4, (0, 220, 255), -1, cv2.LINE_AA)
 
     # 3. Top Info Header: Round & Score Badges
     top_badge_y = 22

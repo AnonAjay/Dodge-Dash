@@ -133,8 +133,8 @@ class BlazerIndexer:
         # 33 landmarks in normalized [0, 1] space
         landmarks_norm = [[round(float(lm.x), 4), round(float(lm.y), 4)] for lm in lms]
 
-        # Extract angles using pose_matcher logic (unmirrored for reference photos)
-        angles_raw = extract_pose_angles(lms, mirrored=False)
+        # Extract 2D angles in mirrored screen-space so screen-left matches screen-left
+        angles_raw = extract_pose_angles(landmarks_norm, mirrored=True, planar_2d=True)
         target_angles = {k: float(v) for k, v in angles_raw.items() if v is not None}
 
         # Detect Key Joints (limbs that define this pose vs neutral standing)

@@ -140,7 +140,7 @@ def evaluate_blazer_pose(
     if isinstance(player_landmarks, dict):
         player_angles = {k: float(v) for k, v in player_landmarks.items() if v is not None}
     else:
-        player_angles = extract_pose_angles(player_landmarks, mirrored=mirrored)
+        player_angles = extract_pose_angles(player_landmarks, mirrored=mirrored, planar_2d=True)
 
     target_angles = target.target_angles
     key_joints_set = set(target.key_joints)
