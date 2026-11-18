@@ -3,8 +3,8 @@
 ## Goal
 A body-controlled camera game for a college tech-fest stall. Crowd retention is the win
 condition: it must be understood in 10 seconds and be fun to watch from 10 feet away.
-- Station A (Laptop 1): Dodge on a floor-tile grid, then Wall Shape.
-- Station B (Laptop 2): Dance + hype meter. Later; do not build it yet.
+- Station A (Laptop 1): Floor is Lava (10x10 grid dodge + jump immunity).
+- Station B (Laptop 2): Wall Shape (oncoming 3D walls + body cutout matching).
 - Laptop 3: score server, big-screen leaderboard, photo cards.
 
 ## Hard constraints (never break these)
@@ -19,8 +19,9 @@ condition: it must be understood in 10 seconds and be fun to watch from 10 feet 
 | Folder | Owner | Rule |
 |---|---|---|
 | shared/ | lead only | contracts; any change must be announced to the whole team |
-| pose_core/ | pose team | camera thread, MediaPipe, smoothing, floor mapping |
-| station_a/ | logic + render team | rules in logic.py (pure), drawing in render.py |
+| pose_core/ | pose team | camera thread, MediaPipe, smoothing, floor mapping, pose matcher |
+| station_a/ | logic + render team | Floor is Lava: rules in logic.py (pure), drawing in render.py |
+| station_b/ | logic + render team | Wall Shape: rules in logic.py (pure), drawing in render.py |
 | server/ | server team | FastAPI, leaderboard |
 | cards/ | cards team | photo card + filter, runs on Laptop 3 only |
 | tools/ | anyone | scripts, never imported by the game |
@@ -32,7 +33,8 @@ python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\
 pip install -r requirements.txt
 python -m tools.get_models                              # downloads the pose model
 python -m tools.timing_test                             # camera + pose ms per frame
-python -m station_a --keyboard                          # play without a camera
+python -m station_a --keyboard                          # Station A (Lava) without a camera
+python -m station_b --keyboard                          # Station B (Wall Shape) without a camera
 uvicorn server.app:app --host 0.0.0.0 --port 8000       # Laptop 3
 pytest
 ```
