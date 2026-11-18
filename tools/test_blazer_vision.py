@@ -39,6 +39,7 @@ from pose_core.blazer_matcher import (
     render_reference_card,
 )
 from pose_core.capture import CameraPoseSource
+from pose_core.floor_map import FloorMapper
 from pose_core.pose_matcher import extract_pose_angles
 from pose_core.skeleton import BONES
 from station_b.keyboard_input import KeyboardWallPoseProvider
@@ -66,8 +67,20 @@ def main() -> None:
     if args.keyboard:
         provider = KeyboardWallPoseProvider(arena_w_m=1.8, arena_d_m=1.8)
     else:
-        provider = CameraPoseSource(cam_index=args.camera, width=640, height=480)
-        provider.start()
+        try:
+            mapper = FloorMapper.load()
+            if mapper is None:
+                mapper = FloorMapper(
+                    corners_px=[[100, 460], [540, 460], [460, 180], [180, 180]],
+                    w_m=1.8,
+                    h_m=1.8,
+                )
+            provider = CameraPoseSource(camera_index=args.camera, mapper=mapper)
+            provider.start()
+        except Exception as e:
+            print(f"Warning: Could not open camera {args.camera} ({e}). Falling back to keyboard.")
+            provider = KeyboardWallPoseProvider(arena_w_m=1.8, arena_d_m=1.8)
+            args.keyboard = True
 
     pose_idx = 0
     running = True
