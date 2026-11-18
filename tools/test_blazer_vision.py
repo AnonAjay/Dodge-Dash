@@ -17,6 +17,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -361,3 +362,7 @@ def _render_live_hud(
         b_col = C_NEON_CYAN_BGR
 
     cv2.putText(canvas, b_text, (24, h - 18), cv2.FONT_HERSHEY_DUPLEX, 0.65, b_col, 1, cv2.LINE_AA)
+
+
+if __name__ == "__main__":
+    main()
