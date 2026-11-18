@@ -23,7 +23,7 @@ import pygame
 
 from pose_core.floor_map import FloorMapper
 from shared.contracts import GameState, Phase, PoseFrame
-from station_a.logic import GRID_SIZE, LavaWave
+from station_a.logic import GRID_SIZE, LavaWave, get_streak_multiplier
 
 # Base Window Geometry
 DEFAULT_WIDTH = 1024
@@ -709,6 +709,7 @@ class LavaArenaRenderer:
              round_timer: float = 0.0,
              current_round: int = 1,
              round_multiplier: float = 1.0,
+             is_resting: bool = False,
              fps: float = 60.0) -> None:
         """Render complete AR frame scaled dynamically to the maximized window size."""
         now = time.time() - self.start_time
@@ -775,28 +776,31 @@ class LavaArenaRenderer:
         title = self.font_title.render("STATION A: FLOOR IS LAVA", True, (255, 90, 30))
         self.screen.blit(title, (24, 8))
 
-        # Round Badge & Multiplier
-        if current_round == 1:
-            badge_str = "ROUND 1/3 (WARMUP) | MULT: x1.0"
+        # Round Badge & Pacing Archetype
+        if is_resting:
+            round_label = f"ROUND {current_round}/3" if current_round < 3 else "FINAL ROUND"
+            badge_str = f"{round_label} (RESTING) | PREPARE"
+            badge_col = (0, 240, 255)
+        elif current_round == 1:
+            badge_str = "ROUND 1/3 (RIVERS)   | 5s PACING"
             badge_col = (0, 255, 120)
         elif current_round == 2:
-            badge_str = "ROUND 2/3 (CHAOS)  | MULT: x1.5"
+            badge_str = "ROUND 2/3 (CIRCLES)  | 4s PACING"
             badge_col = (255, 180, 0)
         else:
-            badge_str = "FINAL ROUND (SURGE)| MULT: x2.0"
+            badge_str = "FINAL ROUND (BRIDGES)| 3s PACING"
             badge_col = (255, 50, 50)
         badge_surf = self.font_small.render(badge_str, True, badge_col)
         self.screen.blit(badge_surf, (24, 38))
 
-        # Score & Combined Multiplier (Centered dynamically)
-        streak_mult = min(2.0, 1.0 + (state.streak // 5) * 0.1)
-        total_mult = streak_mult * round_multiplier
+        # Score & Streak Multiplier (Centered dynamically)
+        mult = get_streak_multiplier(state.streak)
         score_x = max(340, win_w // 2 - 100)
         score_txt = self.font_large.render(f"SCORE: {state.score:04d}", True, TEXT_GOLD)
         self.screen.blit(score_txt, (score_x, 8))
 
         streak_col = (0, 255, 160) if state.streak > 0 else TEXT_MUTED
-        streak_txt = self.font_small.render(f"STREAK: {state.streak} (x{streak_mult:.1f}) | DODGES: {state.dodges} | TOTAL: x{total_mult:.1f}", True, streak_col)
+        streak_txt = self.font_small.render(f"STREAK: {state.streak} (x{mult:.1f}) | DODGES: {state.dodges} | HITS: {state.hits}", True, streak_col)
         self.screen.blit(streak_txt, (score_x, 38))
 
         # Time Left (Right-aligned dynamically)
@@ -805,17 +809,17 @@ class LavaArenaRenderer:
         time_txt = self.font_large.render(f"{secs:02d}s", True, time_col)
         self.screen.blit(time_txt, (win_w - 100, 10))
 
-        # Time gauge bar
+        # Time gauge bar (Scaled to 30.0s active round)
         bar_w = 80
         bar_h = 7
-        pct = max(0.0, min(1.0, state.time_left_s / 60.0))
+        pct = max(0.0, min(1.0, state.time_left_s / 30.0))
         pygame.draw.rect(self.screen, (35, 42, 54), (win_w - 105, 44, bar_w, bar_h))
         pygame.draw.rect(self.screen, time_col, (win_w - 105, 44, int(bar_w * pct), bar_h))
 
         # ======================================================================
         # 3. CENTER-SCREEN STREET FIGHTER ARCADE ROUND BANNER
         # ======================================================================
-        if round_timer > 0.0 and round_title:
+        if (round_timer > 0.0 or is_resting) and round_title:
             cy = win_h // 2
             band_h = 130
             # Dark letterbox strip across the center of the display

@@ -17,7 +17,7 @@ from pose_core.capture import CameraPoseSource
 from pose_core.floor_map import FloorMapper
 from shared.contracts import Phase, PoseProvider, ScoreEvent
 from station_a.keyboard_input import KeyboardPoseProvider
-from station_a.logic import LavaEngine
+from station_a.logic import LavaEngine, ROUND_DURATION_S, TournamentPhase
 from station_a.outbox import enqueue_score
 from station_a.render import LavaArenaRenderer, install_pose_tracker_hook
 
@@ -27,7 +27,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Station A: Floor is Lava")
     parser.add_argument("--keyboard", action="store_true", help="Keyboard controls (WASD to walk, SPACE to jump)")
     parser.add_argument("--camera", type=int, default=0, help="Camera device index (default: 0)")
-    parser.add_argument("--duration", type=float, default=60.0, help="Round duration in seconds (default: 60)")
+    parser.add_argument("--duration", type=float, default=ROUND_DURATION_S, help="Round duration in seconds (default: 30)")
     parser.add_argument("--player", type=str, default="P001", help="Player ID (default: P001)")
     parser.add_argument("--fullscreen", action="store_true", help="Launch in full-screen display mode")
     args = parser.parse_args()
@@ -63,7 +63,7 @@ def main() -> None:
     provider.start()
 
     # 3. Initialize Game Engine & Renderer
-    engine = LavaEngine(duration_s=args.duration)
+    engine = LavaEngine(duration_s=args.duration, arena_w_m=arena_w, arena_h_m=arena_h)
     engine.start_game(player_id=args.player)
 
     renderer = LavaArenaRenderer(mapper=mapper, arena_w_m=arena_w, arena_h_m=arena_h, fullscreen=args.fullscreen)
@@ -145,6 +145,7 @@ def main() -> None:
                 round_timer=engine.round_banner_timer,
                 current_round=engine.current_round,
                 round_multiplier=engine.round_multiplier,
+                is_resting=(engine.tournament_phase == TournamentPhase.RESTING),
                 fps=clock.get_fps(),
             )
 
