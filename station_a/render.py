@@ -170,8 +170,8 @@ def install_pose_tracker_hook() -> None:
 
         orig_update = PoseTracker.update
 
-        def hooked_update(self, people, img_w: int, img_h: int, ts: float):
-            pf = orig_update(self, people, img_w, img_h, ts)
+        def hooked_update(self, people, img_w: int, img_h: int, ts: float, *args, **kwargs):
+            pf = orig_update(self, people, img_w, img_h, ts, *args, **kwargs)
             if people and pf.tracked:
                 # Find candidate matching self.debug["pts"] or closest to foot_px
                 matched_lms = None
