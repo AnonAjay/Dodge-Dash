@@ -1,10 +1,14 @@
 """Interactive Vision & Pose Matching Debugger for Pose Blazer.
 
-Run to test pose extraction, matching, and visual feedback in real-time:
-  # With webcam:
-  python tools/test_blazer_vision.py --camera 0
+Features:
+  - 7.0-second countdown timer with auto-advancing poses.
+  - Hold-to-snap lock-in mechanism (0.30s at >= 75% match).
+  - Speed bonus scoring calculation (+base, +speed bonus, +perfection bonus).
+  - Real-time skeleton overlay, key-joint coloring, and directional hints.
+  - Webcam mode (--camera 0) or Keyboard simulation mode (--keyboard).
 
-  # With keyboard simulation (no camera needed):
+Usage:
+  python tools/test_blazer_vision.py --camera 0
   python tools/test_blazer_vision.py --keyboard
 """
 from __future__ import annotations
@@ -34,7 +38,6 @@ from pose_core.blazer_matcher import (
     C_DARK_BG_BGR,
     C_NEON_CYAN_BGR,
     C_NEON_GREEN_BGR,
-    evaluate_blazer_pose,
     load_blazer_catalog,
     render_reference_card,
 )
@@ -42,6 +45,8 @@ from pose_core.capture import CameraPoseSource
 from pose_core.floor_map import FloorMapper
 from pose_core.pose_matcher import extract_pose_angles
 from pose_core.skeleton import BONES
+from shared.contracts import Phase
+from station_b.blazer_logic import BlazerGameEngine
 from station_b.keyboard_input import KeyboardWallPoseProvider
 
 
@@ -50,6 +55,7 @@ def main() -> None:
     parser.add_argument("--camera", type=int, default=0, help="Camera index")
     parser.add_argument("--keyboard", action="store_true", help="Keyboard simulation mode")
     parser.add_argument("--catalog", type=str, default="data/poses_index.json", help="Catalog path")
+    parser.add_argument("--time", type=float, default=7.0, help="Round duration in seconds (default 7.0)")
     args = parser.parse_args()
 
     catalog = load_blazer_catalog(args.catalog)
@@ -60,7 +66,7 @@ def main() -> None:
     pygame.init()
     win_w, win_h = 1180, 680
     screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
-    pygame.display.set_caption("Pose Blazer - Vision & Pose Matching Debugger")
+    pygame.display.set_caption("Pose Blazer - 7s Time-Attack Vision Engine")
     clock = pygame.time.Clock()
 
     # Pose provider setup
@@ -82,7 +88,14 @@ def main() -> None:
             provider = KeyboardWallPoseProvider(arena_w_m=1.8, arena_d_m=1.8)
             args.keyboard = True
 
-    pose_idx = 0
+    # Initialize 7-Second Game State Engine
+    engine = BlazerGameEngine(
+        catalog=catalog,
+        round_duration_s=args.time,
+        total_rounds=len(catalog),
+    )
+    engine.start_game()
+
     running = True
 
     try:
@@ -96,11 +109,10 @@ def main() -> None:
                     if event.key in (pygame.K_ESCAPE, pygame.K_q):
                         running = False
                     elif event.key == pygame.K_SPACE:
-                        pose_idx = (pose_idx + 1) % len(catalog)
+                        # Manual skip to next pose
+                        engine._advance_to_next_pose()
 
-            current_pose = catalog[pose_idx]
-
-            # Fetch live frame and landmarks
+            # Snapshot pose and camera frame
             cam_frame = None
             debug_info = None
             player_angles: dict[str, float | None] = {}
@@ -125,13 +137,23 @@ def main() -> None:
                 player_angles = provider.get_angles()
                 player_head_norm = provider.get_head()
 
-            # Evaluate pose similarity
-            match_res = evaluate_blazer_pose(
-                player_landmarks=player_angles,
-                target_pose=current_pose,
+            # Tick 7-Second Auto-Advancing Engine
+            state, current_pose = engine.update(
+                pose=pose,
+                dt=dt,
+                player_angles=player_angles,
                 player_head_norm=player_head_norm,
-                mirrored=True,
             )
+
+            if state.phase == Phase.RESULT:
+                # Loop continuously in debugger
+                engine.start_game()
+                current_pose = engine.current_pose
+
+            if current_pose is None:
+                current_pose = catalog[0]
+
+            match_res = engine.last_match_result
 
             # Build Composite Canvas: [Left: Reference Card | Right: Live Feed]
             card_w = 340
@@ -148,7 +170,7 @@ def main() -> None:
                 live_view = np.zeros((live_h, live_w, 3), dtype=np.uint8)
                 live_view[:] = (22, 26, 36)
 
-            _render_live_hud(live_view, match_res, debug_info, player_head_norm)
+            _render_live_hud(live_view, engine, match_res, debug_info)
 
             # Assemble into unified screen
             unified_bgr = np.zeros((win_h, win_w, 3), dtype=np.uint8)
@@ -170,24 +192,25 @@ def main() -> None:
 
 def _render_live_hud(
     canvas: np.ndarray,
+    engine: BlazerGameEngine,
     res: Any,
     debug_info: dict | None,
-    player_head_norm: tuple[float, float] | None,
 ) -> None:
-    """Render player skeleton, head alignment box, and match gauge onto live view."""
+    """Render player skeleton, countdown timer bar, match gauge, and feedback."""
     h, w = canvas.shape[:2]
 
     # 1. Head Alignment Target Box
     tgt_x = w // 2
-    tgt_y = int(h * 0.25)
+    tgt_y = int(h * 0.28)
     bw, bh = int(w * 0.18), int(h * 0.24)
     bx1, by1 = tgt_x - bw // 2, tgt_y - bh // 2
     bx2, by2 = tgt_x + bw // 2, tgt_y + bh // 2
 
-    box_col = C_NEON_GREEN_BGR if res.head_aligned else (0, 220, 255)
+    is_head_ok = res.head_aligned if res else False
+    box_col = C_NEON_GREEN_BGR if is_head_ok else (0, 220, 255)
     cv2.rectangle(canvas, (bx1, by1), (bx2, by2), box_col, 2, cv2.LINE_AA)
 
-    lbl = "HEAD ALIGNED" if res.head_aligned else "ALIGN HEAD HERE"
+    lbl = "HEAD ALIGNED" if is_head_ok else "ALIGN HEAD HERE"
     cv2.putText(canvas, lbl, (bx1 + 4, by1 - 8), cv2.FONT_HERSHEY_DUPLEX, 0.45, box_col, 1, cv2.LINE_AA)
 
     # 2. Player skeleton overlay with color-coded joints
@@ -202,18 +225,51 @@ def _render_live_hud(
         for px, py in pts:
             cv2.circle(canvas, (px, py), 5, (255, 255, 0), -1, cv2.LINE_AA)
 
-    # 3. Match Progress Gauge at Top
+    # 3. Top Info Header: Round & Score Badges
+    top_badge_y = 22
+    round_str = f"ROUND {engine.round_number}/{engine.total_rounds}"
+    score_str = f"SCORE: {engine.state.score}  |  STREAK: {engine.state.streak}"
+    cv2.putText(canvas, round_str, (16, top_badge_y), cv2.FONT_HERSHEY_DUPLEX, 0.65, (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.putText(canvas, score_str, (w - 290, top_badge_y), cv2.FONT_HERSHEY_DUPLEX, 0.55, C_NEON_GREEN_BGR, 1, cv2.LINE_AA)
+
+    # 4. 7.0-Second Countdown Timer Bar
+    t_ratio = max(0.0, min(1.0, engine.time_left_s / engine.round_duration_s))
+    t_bar_w = int(w * 0.70)
+    t_bar_h = 16
+    tx = (w - t_bar_w) // 2
+    ty = 36
+
+    # Background
+    cv2.rectangle(canvas, (tx, ty), (tx + t_bar_w, ty + t_bar_h), (25, 30, 42), -1)
+
+    # Timer fill color: Cyan -> Amber (<4s) -> Flashing Red (<2s)
+    if engine.time_left_s > 3.5:
+        t_col = C_NEON_CYAN_BGR
+    elif engine.time_left_s > 1.8:
+        t_col = C_AMBER_YELLOW_BGR
+    else:
+        # Flashing alert red
+        t_col = C_ALERT_RED_BGR if int(time.time() * 6) % 2 == 0 else (255, 100, 100)
+
+    fill_tw = int(t_bar_w * t_ratio)
+    cv2.rectangle(canvas, (tx, ty), (tx + fill_tw, ty + t_bar_h), t_col, -1)
+    cv2.rectangle(canvas, (tx, ty), (tx + t_bar_w, ty + t_bar_h), (120, 140, 160), 1)
+
+    timer_text = f"TIME: {engine.time_left_s:.1f}s"
+    cv2.putText(canvas, timer_text, (tx + t_bar_w + 12, ty + 13), cv2.FONT_HERSHEY_SIMPLEX, 0.45, t_col, 1, cv2.LINE_AA)
+
+    # 5. Match Progress Gauge
     bar_w = int(w * 0.70)
     bar_h = 24
     bx = (w - bar_w) // 2
-    by = 20
+    by = 58
 
-    # Background
     cv2.rectangle(canvas, (bx, by), (bx + bar_w, by + bar_h), (30, 35, 48), -1)
 
-    # Progress fill
-    fill_w = int(bar_w * (res.match_pct / 100.0))
-    bar_col = C_NEON_GREEN_BGR if res.is_matched else (C_AMBER_YELLOW_BGR if res.match_pct >= 50 else C_ALERT_RED_BGR)
+    match_pct = res.match_pct if res else 0.0
+    fill_w = int(bar_w * (match_pct / 100.0))
+    is_ok = res.is_matched if res else False
+    bar_col = C_NEON_GREEN_BGR if is_ok else (C_AMBER_YELLOW_BGR if match_pct >= 50 else C_ALERT_RED_BGR)
     cv2.rectangle(canvas, (bx, by), (bx + fill_w, by + bar_h), bar_col, -1)
     cv2.rectangle(canvas, (bx, by), (bx + bar_w, by + bar_h), (255, 255, 255), 2)
 
@@ -221,15 +277,27 @@ def _render_live_hud(
     mark_x = int(bx + bar_w * 0.75)
     cv2.line(canvas, (mark_x, by - 4), (mark_x, by + bar_h + 4), (255, 255, 255), 2)
 
-    gauge_text = f"MATCH: {res.match_pct:.1f}%  ({'PASSED!' if res.is_matched else 'AIM >= 75%'})"
-    cv2.putText(canvas, gauge_text, (bx + 12, by + 17), cv2.FONT_HERSHEY_DUPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+    # Hold progress text
+    if is_ok:
+        hold_pct = min(100, int((engine.hold_timer_s / 0.30) * 100))
+        gauge_text = f"MATCH: {match_pct:.1f}%  (HOLDING: {hold_pct}%)"
+    else:
+        gauge_text = f"MATCH: {match_pct:.1f}%  (AIM >= 75%)"
 
-    # 4. Directional Feedback Hint Banner at Bottom
+    cv2.putText(canvas, gauge_text, (bx + 12, by + 17), cv2.FONT_HERSHEY_DUPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
+
+    # 6. Directional Feedback Hint Banner at Bottom
     cv2.rectangle(canvas, (0, h - 50), (w, h), (18, 22, 30), -1)
     cv2.line(canvas, (0, h - 50), (w, h - 50), bar_col, 2)
-    hint_str = f"HINT: {res.primary_hint.upper()}"
-    cv2.putText(canvas, hint_str, (24, h - 18), cv2.FONT_HERSHEY_DUPLEX, 0.65, bar_col, 1, cv2.LINE_AA)
 
+    if engine.banner_msg:
+        b_text = engine.banner_msg.upper()
+        b_col = engine.banner_color
+    elif res:
+        b_text = f"HINT: {res.primary_hint.upper()}"
+        b_col = bar_col
+    else:
+        b_text = "STRIKE THE POSE!"
+        b_col = C_NEON_CYAN_BGR
 
-if __name__ == "__main__":
-    main()
+    cv2.putText(canvas, b_text, (24, h - 18), cv2.FONT_HERSHEY_DUPLEX, 0.65, b_col, 1, cv2.LINE_AA)

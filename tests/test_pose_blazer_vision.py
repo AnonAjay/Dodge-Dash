@@ -232,3 +232,73 @@ def test_user_poses_catalog_and_images():
         # Test card rendering with actual image files
         card = render_reference_card(pose, width=340, height=460, poses_dir="data/poses")
         assert card.shape == (460, 340, 3)
+
+
+def test_blazer_engine_auto_advance_on_7s_timeout():
+    from shared.contracts import Phase, PoseFrame
+    from station_b.blazer_logic import BlazerGameEngine
+
+    catalog = load_blazer_catalog("data/poses_index.json")
+    engine = BlazerGameEngine(catalog=catalog, round_duration_s=7.0, total_rounds=5)
+    engine.start_game("P001")
+
+    assert engine.state.phase == Phase.PLAYING
+    assert engine.round_number == 1
+    pose1_id = engine.current_pose.id
+
+    pose_frame = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9)
+    wrong_angles = {"left_shoulder": 0.0, "right_shoulder": 0.0}
+
+    # Advance 7.1 seconds (exceeding 7.0s timeout limit)
+    for _ in range(71):
+        engine.update(pose_frame, dt=0.1, player_angles=wrong_angles)
+
+    # Must register miss
+    assert engine.state.hits == 1
+    assert engine.state.score == 0
+    assert "TIME OUT" in engine.banner_msg
+
+    # Advance 1.1s through the cooldown pause -> must auto-advance to round 2!
+    for _ in range(11):
+        engine.update(pose_frame, dt=0.1)
+
+    assert engine.round_number == 2
+    assert engine.time_left_s == 7.0
+
+
+def test_blazer_engine_hold_and_speed_bonus():
+    from shared.contracts import Phase, PoseFrame
+    from station_b.blazer_logic import BlazerGameEngine
+
+    catalog = load_blazer_catalog("data/poses_index.json")
+    engine = BlazerGameEngine(catalog=catalog, round_duration_s=7.0, total_rounds=5)
+    engine.start_game("P001")
+
+    pose_frame = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9)
+    current_target = engine.current_pose
+    matching_angles = dict(current_target.target_angles)
+
+    # 1. Player does not match pose at t = 0.5s
+    for _ in range(5):
+        engine.update(pose_frame, dt=0.1, player_angles={})
+
+    # 2. Player holds matching pose for 0.4s (exceeding 0.3s hold threshold)
+    for _ in range(4):
+        engine.update(
+            pose_frame,
+            dt=0.1,
+            player_angles=matching_angles,
+            player_head_norm=(0.50, 0.25),
+        )
+
+    # Should lock in with speed bonus (> 100 pts)
+    assert engine.is_pose_locked is True
+    assert engine.state.dodges == 1
+    assert engine.state.score >= 200  # Base 100 + ~120 speed bonus
+    assert "SNAP" in engine.banner_msg
+
+    # Advance 1.1s cooldown -> auto-advances to round 2
+    for _ in range(11):
+        engine.update(pose_frame, dt=0.1)
+
+    assert engine.round_number == 2
