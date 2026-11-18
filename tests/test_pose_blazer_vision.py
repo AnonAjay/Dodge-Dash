@@ -198,3 +198,37 @@ def test_reference_card_renderer():
     card = render_reference_card(tmpl, width=320, height=440)
     assert isinstance(card, np.ndarray)
     assert card.shape == (440, 320, 3)
+
+
+def test_user_poses_catalog_and_images():
+    """Verify user's added poses load from data/poses_index.json and render cards."""
+    catalog = load_blazer_catalog("data/poses_index.json")
+    assert len(catalog) >= 5
+
+    expected_ids = {
+        "ash_ketchum",
+        "gojo_funnypose",
+        "mario",
+        "naruto_sittingpose",
+        "spiderman_pose",
+    }
+    actual_ids = {p.id for p in catalog}
+    assert expected_ids.issubset(actual_ids)
+
+    for pose in catalog:
+        assert len(pose.target_angles) >= 6
+        assert len(pose.key_joints) >= 2
+        assert len(pose.landmarks_norm) == 33
+
+        # Test evaluating pose against its own target angles (should yield 100%)
+        res = evaluate_blazer_pose(
+            player_landmarks=pose.target_angles,
+            target_pose=pose,
+            player_head_norm=(0.50, 0.25),
+        )
+        assert res.match_pct >= 95.0
+        assert res.is_matched is True
+
+        # Test card rendering with actual image files
+        card = render_reference_card(pose, width=340, height=460, poses_dir="data/poses")
+        assert card.shape == (460, 340, 3)

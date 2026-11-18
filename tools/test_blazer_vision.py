@@ -143,9 +143,9 @@ def main() -> None:
             unified_bgr[10 : 10 + live_h, 10 : 10 + card_w] = ref_card
             unified_bgr[10 : 10 + live_h, 20 + card_w : 20 + card_w + live_w] = live_view
 
-            # Blit to pygame surface
+            # Blit to pygame surface without axis distortion
             rgb_frame = cv2.cvtColor(unified_bgr, cv2.COLOR_BGR2RGB)
-            surf = pygame.surfarray.make_surface(np.rot90(rgb_frame))
+            surf = pygame.image.frombuffer(rgb_frame.tobytes(), (win_w, win_h), "RGB")
             screen.blit(surf, (0, 0))
             pygame.display.flip()
 
