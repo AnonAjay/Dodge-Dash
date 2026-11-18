@@ -166,16 +166,88 @@ class WallArenaRenderer:
         cam_h, cam_w = cam_frame.shape[:2]
         out = cam_frame.copy()
 
-        # 1. Perspective Floor Grid and Standing Target
+        # ----------------------------------------------------------------------
+        # 1. Predefined Head Alignment Target Box
+        # ----------------------------------------------------------------------
+        tgt_head_x = cam_w // 2
+        tgt_head_y = int(cam_h * 0.25)
+        box_w = int(cam_w * 0.18)       # ~115px wide on 640w
+        box_h = int(cam_h * 0.24)       # ~115px high on 480h
+
+        box_x1 = tgt_head_x - box_w // 2
+        box_y1 = tgt_head_y - box_h // 2
+        box_x2 = tgt_head_x + box_w // 2
+        box_y2 = tgt_head_y + box_h // 2
+
+        # Extract live player head point (MediaPipe Landmark 0: Nose / Head Center)
+        is_head_aligned = False
+        head_px = None
+        if debug and "landmarks_px" in debug and len(debug["landmarks_px"]) > 0:
+            lm0 = debug["landmarks_px"][0]
+            hx, hy = float(lm0[0]), float(lm0[1])
+            hvis = float(lm0[2]) if len(lm0) > 2 else 1.0
+            if hvis > 0.35:
+                head_px = (int(round(hx)), int(round(hy)))
+                if box_x1 <= hx <= box_x2 and box_y1 <= hy <= box_y2:
+                    is_head_aligned = True
+
+        # Dynamic Box Color: Bright Safe Green when aligned, Amber/Cyan when waiting
+        box_color = C_PASS_BGR if is_head_aligned else (0, 220, 255)
+        fill_color = (0, 80, 0) if is_head_aligned else (20, 45, 75)
+        label_text = "HEAD ALIGNED" if is_head_aligned else "ALIGN HEAD HERE"
+
+        # Translucent Box Fill
+        box_overlay = out.copy()
+        cv2.rectangle(box_overlay, (box_x1, box_y1), (box_x2, box_y2), fill_color, -1)
+        cv2.addWeighted(box_overlay, 0.35, out, 0.65, 0, out)
+
+        # Crisp Border
+        cv2.rectangle(out, (box_x1, box_y1), (box_x2, box_y2), box_color, 2, cv2.LINE_AA)
+
+        # Arcade Corner Brackets (accents)
+        c_len = 14
+        # Top-Left
+        cv2.line(out, (box_x1, box_y1), (box_x1 + c_len, box_y1), box_color, 4, cv2.LINE_AA)
+        cv2.line(out, (box_x1, box_y1), (box_x1, box_y1 + c_len), box_color, 4, cv2.LINE_AA)
+        # Top-Right
+        cv2.line(out, (box_x2, box_y1), (box_x2 - c_len, box_y1), box_color, 4, cv2.LINE_AA)
+        cv2.line(out, (box_x2, box_y1), (box_x2, box_y1 + c_len), box_color, 4, cv2.LINE_AA)
+        # Bottom-Left
+        cv2.line(out, (box_x1, box_y2), (box_x1 + c_len, box_y2), box_color, 4, cv2.LINE_AA)
+        cv2.line(out, (box_x1, box_y2), (box_x1, box_y2 - c_len), box_color, 4, cv2.LINE_AA)
+        # Bottom-Right
+        cv2.line(out, (box_x2, box_y2), (box_x2 - c_len, box_y2), box_color, 4, cv2.LINE_AA)
+        cv2.line(out, (box_x2, box_y2), (box_x2 - c_len, box_y2), box_color, 4, cv2.LINE_AA)
+
+        # Header Badge
+        (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_DUPLEX, 0.40, 1)
+        badge_w = tw + 14
+        badge_h = 20
+        cv2.rectangle(out, (box_x1, box_y1 - badge_h), (box_x1 + badge_w, box_y1), (15, 18, 25), -1)
+        cv2.rectangle(out, (box_x1, box_y1 - badge_h), (box_x1 + badge_w, box_y1), box_color, 1)
+        cv2.putText(out, label_text, (box_x1 + 7, box_y1 - 6),
+                    cv2.FONT_HERSHEY_DUPLEX, 0.40, box_color, 1, cv2.LINE_AA)
+
+        # Draw Head Reticle on Player
+        if head_px is not None:
+            cv2.circle(out, head_px, 6, box_color, -1, cv2.LINE_AA)
+            cv2.circle(out, head_px, 10, (255, 255, 255), 1, cv2.LINE_AA)
+
+        # ----------------------------------------------------------------------
+        # 2. Perspective Floor Grid and Standing Target
+        # ----------------------------------------------------------------------
         if self.mapper is not None:
             w_m, h_m = self.mapper.w_m, self.mapper.h_m
             poly = np.array([self.mapper.corners_px], dtype=np.int32)
             cv2.polylines(out, poly, True, (60, 180, 240), 2, cv2.LINE_AA)
 
-            # Center target "STAND HERE"
+            # Center target "STAND HERE" (turns green when aligned)
+            floor_target_col = C_PASS_BGR if is_head_aligned else (0, 240, 255)
             cx, cy = self.mapper.to_pixels(w_m / 2.0, h_m / 2.0)
-            cv2.circle(out, (int(round(cx)), int(round(cy))), 12, (0, 240, 255), 2, cv2.LINE_AA)
-            cv2.circle(out, (int(round(cx)), int(round(cy))), 4, (0, 240, 255), -1, cv2.LINE_AA)
+            cv2.circle(out, (int(round(cx)), int(round(cy))), 14, floor_target_col, 2, cv2.LINE_AA)
+            cv2.circle(out, (int(round(cx)), int(round(cy))), 5, floor_target_col, -1, cv2.LINE_AA)
+            cv2.putText(out, "STAND HERE", (int(round(cx)) - 42, int(round(cy)) + 24),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.36, floor_target_col, 1, cv2.LINE_AA)
 
             # Feet contact points
             if pose.left_foot_m:
@@ -185,7 +257,7 @@ class WallArenaRenderer:
                 rx, ry = self.mapper.to_pixels(*pose.right_foot_m)
                 cv2.circle(out, (int(round(rx)), int(round(ry))), 8, (255, 0, 255), -1, cv2.LINE_AA)
 
-        # 2. Draw 3D Oncoming Wall with Cutout Silhouette
+        # 3. Draw 3D Oncoming Wall with Cutout Silhouette
         if wall is not None:
             # Perspective scaling: starts small at far edge (y=1.8), grows as y approaches 0
             y_m = max(-0.2, min(1.8, wall.y_m))
@@ -320,9 +392,21 @@ class WallArenaRenderer:
                     if j1 < len(r_px) and j2 < len(r_px):
                         pygame.draw.line(virtual_surf, (255, 230, 0), r_px[j1], r_px[j2], 3)
 
+            # Predefined Head Target Box in Virtual Stage
+            v_box_w = int(win_w * 0.16)
+            v_box_h = int(win_h * 0.22)
+            v_box_x = win_w // 2 - v_box_w // 2
+            v_box_y = int(horizon_y * 0.45)
+
+            fx = max(0.0, min(1.0, pose.floor_x_m / 1.8)) if pose.floor_x_m is not None else 0.5
+            is_virtual_aligned = (abs(fx - 0.5) <= 0.09)
+            v_col = (0, 255, 120) if is_virtual_aligned else (0, 220, 255)
+            pygame.draw.rect(virtual_surf, v_col, (v_box_x, v_box_y, v_box_w, v_box_h), 2)
+            v_lbl = self.font_small.render("HEAD ALIGNED" if is_virtual_aligned else "ALIGN HEAD HERE", True, v_col)
+            virtual_surf.blit(v_lbl, (v_box_x + 6, v_box_y - 18))
+
             # Virtual player dot
             if pose.floor_x_m is not None and pose.floor_y_m is not None:
-                fx = max(0.0, min(1.0, pose.floor_x_m / 1.8))
                 fy = max(0.0, min(1.0, pose.floor_y_m / 1.8))
                 px = int(fx * win_w)
                 py = int(horizon_y + (1.0 - fy) * (win_h - horizon_y))

@@ -47,6 +47,7 @@ class Wall:
     speed_m_s: float = BASE_WALL_SPEED_M_S
     state: WallState = WallState.APPROACHING
     judged: bool = False
+    head_aligned: bool = False
     match_pct: float = 0.0
     score_earned: int = 0
     feedback_hint: str = ""
@@ -111,6 +112,7 @@ class WallShapeEngine:
         pose: PoseFrame,
         dt: float,
         player_angles: dict[str, float | None] | None = None,
+        player_head_norm: tuple[float, float] | None = None,
     ) -> tuple[GameState, Wall | None]:
         dt = min(max(0.0, dt), 0.1)
 
@@ -127,6 +129,15 @@ class WallShapeEngine:
             self.active_wall = None
             return self.state, None
 
+        # Check head alignment (Target is center 0.50, +/- 0.09 lateral)
+        head_aligned = True
+        if player_head_norm is not None:
+            hx, hy = player_head_norm
+            head_aligned = abs(hx - 0.50) <= 0.09 and (0.10 <= hy <= 0.40)
+        elif pose.floor_x_m is not None:
+            # Fallback to floor center if head landmark not provided directly
+            head_aligned = abs(pose.floor_x_m - (ARENA_WIDTH_M / 2.0)) <= 0.35
+
         # Player depth position on floor (default to center if untracked)
         py = pose.floor_y_m if pose.floor_y_m is not None else 0.9
 
@@ -138,6 +149,7 @@ class WallShapeEngine:
             return self.state, self.active_wall
 
         wall = self.active_wall
+        wall.head_aligned = head_aligned
 
         # Move wall toward camera (depth decreases from 1.8m -> 0.0m)
         wall.y_m -= wall.speed_m_s * dt
@@ -156,19 +168,21 @@ class WallShapeEngine:
                 px = pose.floor_x_m if pose.floor_x_m is not None else 0.9
                 player_pos = (px, py) if pose.tracked else None
 
-                # Evaluate pose similarity
+                # Evaluate pose similarity with head alignment
                 match_res = evaluate_pose(
                     player_angles=player_angles or {},
                     player_pos_m=player_pos,
                     template=wall.template,
                     player_tracked=pose.tracked,
+                    player_head_norm=player_head_norm,
                 )
 
                 wall.match_pct = match_res.match_pct
                 wall.joint_results = match_res.joint_results
                 wall.feedback_hint = match_res.primary_hint
 
-                if match_res.match_pct >= PASS_THRESHOLD_PCT and pose.tracked:
+                # Clean pass requires: pose match threshold + player tracked + head aligned with cutout
+                if match_res.match_pct >= PASS_THRESHOLD_PCT and pose.tracked and head_aligned:
                     # SUCCESS: Player cleanly fit through the cutout
                     wall.state = WallState.PASSED
                     self.walls_passed += 1
@@ -195,7 +209,10 @@ class WallShapeEngine:
                     self.state.streak = 0
                     wall.score_earned = 0
 
-                    hint = match_res.primary_hint if pose.tracked else "STEP INTO ARENA"
+                    if not head_aligned and match_res.match_pct >= PASS_THRESHOLD_PCT:
+                        hint = "ALIGN HEAD WITH CUTOUT"
+                    else:
+                        hint = match_res.primary_hint if pose.tracked else "STEP INTO ARENA"
                     self.last_banner_msg = f"SMASH! {hint.upper()}"
                     self.last_banner_color = (255, 40, 40)
                     self.banner_timer = 1.2

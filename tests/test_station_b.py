@@ -72,6 +72,48 @@ def test_wall_collision_pass_with_matching_pose():
     assert state.score >= 100
 
 
+def test_wall_collision_head_alignment():
+    engine = WallShapeEngine(duration_s=60.0)
+    engine.start_game("P001")
+    wall = engine.spawn_wall()
+    engine.active_wall = wall
+
+    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9)
+    wall.y_m = 0.9 + COLLISION_TOLERANCE_M - 0.01
+
+    matching_angles = {
+        "left_shoulder": 95.0,
+        "right_shoulder": 95.0,
+        "left_elbow": 170.0,
+        "right_elbow": 170.0,
+        "left_knee": 165.0,
+        "right_knee": 165.0,
+    }
+
+    # Case A: Head misaligned (far left, x=0.10) -> Hit despite matching angles
+    state, active_wall = engine.update(
+        pose, dt=0.01, player_angles=matching_angles, player_head_norm=(0.10, 0.25)
+    )
+    assert active_wall.judged is True
+    assert active_wall.head_aligned is False
+    assert active_wall.state == WallState.HIT
+    assert state.hits == 1
+
+    # Reset for Case B: Head aligned in target box (centered, x=0.50, y=0.25) -> Pass
+    engine.start_game("P001")
+    wall2 = engine.spawn_wall()
+    engine.active_wall = wall2
+    wall2.y_m = 0.9 + COLLISION_TOLERANCE_M - 0.01
+
+    state, active_wall2 = engine.update(
+        pose, dt=0.01, player_angles=matching_angles, player_head_norm=(0.50, 0.25)
+    )
+    assert active_wall2.judged is True
+    assert active_wall2.head_aligned is True
+    assert active_wall2.state == WallState.PASSED
+    assert state.dodges == 1
+
+
 def test_wall_collision_fail_with_wrong_pose():
     engine = WallShapeEngine(duration_s=60.0)
     engine.start_game("P001")

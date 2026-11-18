@@ -428,6 +428,7 @@ def evaluate_pose(
     angle_tolerance_override: float | None = None,
     pos_tolerance_override: float | None = None,
     player_tracked: bool = True,
+    player_head_norm: tuple[float, float] | None = None,
 ) -> PoseMatchResult:
     """Compare player joint angles and floor position against a Wall Shape template.
 
@@ -534,12 +535,22 @@ def evaluate_pose(
         elif r_kn_tgt - l_kn_tgt >= 50.0 and l_kn_act - r_kn_act >= 40.0:
             hints.insert(0, "Swap legs! (Bend LEFT knee, stand on RIGHT leg)")
 
-    # Position evaluation
+    # Position evaluation (Evaluates head alignment if head point provided; otherwise falls back to floor position)
     pos_dist = 0.0
     pos_matched = True
     pos_score_pct = 100.0
 
-    if template.target_pos_m is not None:
+    if player_head_norm is not None:
+        hx, hy = player_head_norm
+        # Check lateral alignment relative to cutout head center (x=0.50, +/- 0.09)
+        h_diff = abs(hx - 0.50)
+        pos_matched = h_diff <= 0.09
+        pos_dist = h_diff * 1.8
+        pos_score_pct = max(0.0, 100.0 - (h_diff / 0.18) * 100.0)
+        if not pos_matched:
+            p_hint = "Step Left to center head" if hx > 0.50 else "Step Right to center head"
+            hints.insert(0, f"Position: {p_hint}")
+    elif template.target_pos_m is not None:
         if player_pos_m is not None:
             pos_dist = math.hypot(
                 player_pos_m[0] - template.target_pos_m[0],

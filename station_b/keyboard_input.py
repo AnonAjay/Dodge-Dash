@@ -78,3 +78,9 @@ class KeyboardWallPoseProvider:
     def get_angles(self) -> dict[str, float | None]:
         with self._lock:
             return dict(self.simulated_angles)
+
+    def get_head(self) -> tuple[float, float]:
+        """Return simulated normalized head position (0..1) based on floor position."""
+        with self._lock:
+            norm_x = self.x / self.arena_w_m
+            return (round(norm_x, 3), 0.25)

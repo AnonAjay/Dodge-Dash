@@ -106,25 +106,38 @@ def main() -> None:
                     elif event.key in (pygame.K_F11, pygame.K_f):
                         renderer.toggle_fullscreen()
 
-            # Handle keyboard input
+            # Snapshot pose and camera frame
+            cam_frame = None
+            debug_info = None
             player_angles: dict[str, float | None] = {}
+            player_head_norm: tuple[float, float] | None = None
+
+            if hasattr(provider, "snapshot"):
+                pose, cam_frame, debug_info = provider.snapshot()
+                if debug_info and "landmarks_px" in debug_info and len(debug_info["landmarks_px"]) > 0:
+                    player_angles = extract_pose_angles(debug_info["landmarks_px"])
+                    lm0 = debug_info["landmarks_px"][0]
+                    hx, hy = float(lm0[0]), float(lm0[1])
+                    hvis = float(lm0[2]) if len(lm0) > 2 else 1.0
+                    if cam_frame is not None and hvis > 0.35:
+                        h, w = cam_frame.shape[:2]
+                        player_head_norm = (hx / w, hy / h)
+            else:
+                pose = provider.latest()
+
             if args.keyboard and isinstance(provider, KeyboardWallPoseProvider):
                 keys = pygame.key.get_pressed()
                 provider.handle_keys(keys, dt)
                 player_angles = provider.get_angles()
-
-            # Snapshot pose and camera frame
-            cam_frame = None
-            debug_info = None
-            if hasattr(provider, "snapshot"):
-                pose, cam_frame, debug_info = provider.snapshot()
-                if debug_info and "landmarks_px" in debug_info:
-                    player_angles = extract_pose_angles(debug_info["landmarks_px"])
-            else:
-                pose = provider.latest()
+                player_head_norm = provider.get_head()
 
             # Tick game physics
-            state, wall = engine.update(pose, dt, player_angles=player_angles)
+            state, wall = engine.update(
+                pose,
+                dt,
+                player_angles=player_angles,
+                player_head_norm=player_head_norm,
+            )
 
             # Record score upon game completion
             if state.phase == Phase.RESULT and not score_saved:
