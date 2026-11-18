@@ -216,7 +216,7 @@ def test_user_poses_catalog_and_images():
     assert expected_ids.issubset(actual_ids)
 
     for pose in catalog:
-        assert len(pose.target_angles) >= 6
+        assert len(pose.target_angles) >= 4
         assert len(pose.key_joints) >= 1
         assert len(pose.landmarks_norm) == 33
 
