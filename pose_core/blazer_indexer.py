@@ -74,8 +74,8 @@ class BlazerIndexer:
                 base_options=mp_python.BaseOptions(model_asset_path=str(self.model_path)),
                 running_mode=vision.RunningMode.IMAGE,
                 num_poses=1,
-                min_pose_detection_confidence=0.5,
-                min_tracking_confidence=0.5,
+                min_pose_detection_confidence=0.25,
+                min_tracking_confidence=0.25,
             )
             self._landmarker = vision.PoseLandmarker.create_from_options(options)
         return self._landmarker
@@ -86,22 +86,50 @@ class BlazerIndexer:
     ) -> tuple[dict[str, float], list[list[float]], list[str]]:
         """Extract angles, 33 normalized landmarks, and key joints from an image.
 
+        Includes multi-pass border padding fallback for stylized or tight crop images.
+
         Returns:
             (target_angles, landmarks_norm, key_joints)
         """
         import mediapipe as mp
 
+        landmarker = self._get_landmarker()
         h, w = img_bgr.shape[:2]
+
+        # Pass 1: Direct detection
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
-
-        landmarker = self._get_landmarker()
         result = landmarker.detect(mp_img)
 
+        # Pass 2: Fallback with padding (for tight crops / anime drawings)
         if not result.pose_landmarks or len(result.pose_landmarks) == 0:
-            raise ValueError("No person detected in reference image. Please use a clear, full-body photo.")
+            pad = 60
+            padded = cv2.copyMakeBorder(img_bgr, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=[240, 240, 240])
+            padded_rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
+            mp_padded = mp.Image(image_format=mp.ImageFormat.SRGB, data=padded_rgb)
+            result = landmarker.detect(mp_padded)
+            if result.pose_landmarks and len(result.pose_landmarks) > 0:
+                ph, pw = padded.shape[:2]
+                raw_lms = result.pose_landmarks[0]
+                # Unpad normalized landmarks back to original image space
+                unpadded_lms = []
+                for lm in raw_lms:
+                    orig_x = (lm.x * pw - pad) / w
+                    orig_y = (lm.y * ph - pad) / h
+                    unpadded_lms.append(
+                        type("Landmark", (), {
+                            "x": max(0.0, min(1.0, orig_x)),
+                            "y": max(0.0, min(1.0, orig_y)),
+                            "z": getattr(lm, "z", 0.0),
+                            "visibility": getattr(lm, "visibility", 1.0),
+                        })()
+                    )
+                lms = unpadded_lms
+            else:
+                raise ValueError("No person detected in reference image. Please use a clear, full-body photo.")
+        else:
+            lms = result.pose_landmarks[0]
 
-        lms = result.pose_landmarks[0]
         # 33 landmarks in normalized [0, 1] space
         landmarks_norm = [[round(float(lm.x), 4), round(float(lm.y), 4)] for lm in lms]
 

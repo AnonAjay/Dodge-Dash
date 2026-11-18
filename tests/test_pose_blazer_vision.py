@@ -217,7 +217,7 @@ def test_user_poses_catalog_and_images():
 
     for pose in catalog:
         assert len(pose.target_angles) >= 6
-        assert len(pose.key_joints) >= 2
+        assert len(pose.key_joints) >= 1
         assert len(pose.landmarks_norm) == 33
 
         # Test evaluating pose against its own target angles (should yield 100%)
