@@ -35,11 +35,11 @@ ROUND_1_POSE_DURATION_S = 6.0
 ROUND_1_HOLD_S = 0.35
 ROUND_1_PERFECTION_PTS = 150
 ROUND_1_PERFECTION_THRESHOLD = 85.0
-ROUND_1_SKIP_HOLD_S = 1.0
+ROUND_1_SKIP_HOLD_S = 0.50  # Snappy 0.5s skip hold (Hand on Head)
 
 ROUND_2_GLOBAL_DURATION_S = 30.0
 ROUND_2_HOLD_S = 0.20
-ROUND_2_SKIP_HOLD_S = 0.60
+ROUND_2_SKIP_HOLD_S = 0.40  # 0.4s fast skip in Round 2
 ROUND_2_SPEED_MULT = 45.0
 
 INTERMISSION_DURATION_S = 5.0
@@ -64,44 +64,70 @@ class BlazerTournamentPhase(str, Enum):
     COMPLETED = "completed"
 
 
-def is_arms_crossed(
+def is_hand_on_head(
     player_angles: dict[str, float | None] | None,
     player_landmarks_norm: Sequence[Sequence[float]] | None = None,
 ) -> bool:
-    """Pure geometric check for crossed / folded arms skip gesture."""
+    """Detect skip gesture: Hand on Head (Right/Left hand on crown of head) OR Crossed Arms.
+    
+    Vision conditions with MediaPipe 33 normalized landmarks:
+    - Right wrist horizontally aligned with head: abs(wrist.x - nose.x) < 0.15
+    - Right wrist vertically above nose: wrist.y < nose.y
+    - Right elbow bent to reach crown of head: right_elbow < 115.0
+    (Same check supported for Left hand as an ergonomic bonus).
+    """
     if not player_angles:
         return False
 
-    l_el = player_angles.get("left_elbow")
     r_el = player_angles.get("right_elbow")
-    l_sh = player_angles.get("left_shoulder")
     r_sh = player_angles.get("right_shoulder")
+    l_el = player_angles.get("left_elbow")
+    l_sh = player_angles.get("left_shoulder")
 
-    if l_el is None or r_el is None or l_sh is None or r_sh is None:
-        return False
-
-    # 1. Elbows bent sharply across chest
-    if not (50.0 <= l_el <= 105.0 and 50.0 <= r_el <= 105.0):
-        return False
-
-    # 2. Shoulders neutral or low
-    if not (l_sh < 50.0 and r_sh < 50.0):
-        return False
-
-    # 3. If normalized landmarks available, verify wrist cross
+    # 1. Landmark checks (when 33 MediaPipe landmarks are available)
     if player_landmarks_norm and len(player_landmarks_norm) >= 17:
-        lw = player_landmarks_norm[15]  # L_WRIST
-        rw = player_landmarks_norm[16]  # R_WRIST
-        lsh = player_landmarks_norm[11] # L_SHOULDER
-        rsh = player_landmarks_norm[12] # R_SHOULDER
+        nose = player_landmarks_norm[0]
+        rw = player_landmarks_norm[16]
+        lw = player_landmarks_norm[15]
 
+        # Check A: Right hand on head
+        r_bent = (r_el is not None and r_el < 115.0) or (r_sh is not None and r_sh > 40.0)
+        r_on_head = (rw[1] < nose[1]) and (abs(rw[0] - nose[0]) < 0.15) and r_bent
+        if r_on_head:
+            return True
+
+        # Check B: Left hand on head
+        l_bent = (l_el is not None and l_el < 115.0) or (l_sh is not None and l_sh > 40.0)
+        l_on_head = (lw[1] < nose[1]) and (abs(lw[0] - nose[0]) < 0.15) and l_bent
+        if l_on_head:
+            return True
+
+        # Check C: Crossed Arms with landmarks
+        lsh = player_landmarks_norm[11]
+        rsh = player_landmarks_norm[12]
         crossed = (lw[0] < rw[0]) if lsh[0] > rsh[0] else (rw[0] < lw[0])
         mid_sh_y = (lsh[1] + rsh[1]) / 2.0
         chest_level = (lw[1] > mid_sh_y - 0.05) and (rw[1] > mid_sh_y - 0.05)
-        if not (crossed and chest_level):
-            return False
+        elbows_bent = (l_el is not None and 50.0 <= l_el <= 105.0) and (r_el is not None and 50.0 <= r_el <= 105.0)
+        if crossed and chest_level and elbows_bent:
+            return True
 
-    return True
+        # Landmarks present, neither hand on head nor crossed arms
+        return False
+
+    # 2. Angle-only fallback (when landmarks are None / not provided)
+    if r_el is not None and r_sh is not None:
+        if r_el < 105.0 and r_sh > 65.0:
+            return True
+    if l_el is not None and r_el is not None and l_sh is not None and r_sh is not None:
+        if (50.0 <= l_el <= 105.0 and 50.0 <= r_el <= 105.0) and (l_sh < 50.0 and r_sh < 50.0):
+            return True
+
+    return False
+
+
+# Backward-compatibility alias
+is_arms_crossed = is_hand_on_head
 
 
 def check_body_in_frame(

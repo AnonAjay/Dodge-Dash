@@ -19,6 +19,7 @@ from pose_core.capture import CameraPoseSource, PoseTracker
 from pose_core.floor_map import FloorMapper
 from pose_core.pose_matcher import extract_pose_angles
 from shared.contracts import Phase, PoseProvider, ScoreEvent
+from shared.station_client import StationNetworkClient
 from station_b.keyboard_input import KeyboardWallPoseProvider
 from station_b.logic import BlazerGameEngine
 from station_b.outbox import enqueue_score
@@ -58,6 +59,7 @@ def main() -> None:
     parser.add_argument("--player", type=str, default="P001", help="Player ID (default: P001)")
     parser.add_argument("--fullscreen", action="store_true", help="Launch in fullscreen mode")
     parser.add_argument("--rounds", type=int, default=6, help="Total rounds (default: 6)")
+    parser.add_argument("--server", type=str, default=None, help="Laptop 3 server URL (e.g. http://192.168.43.10:8000)")
     parser.add_argument("--no-voice", action="store_true", help="Disable text-to-speech announcer")
     args = parser.parse_args()
 
@@ -97,6 +99,12 @@ def main() -> None:
     engine.start_game(player_id=args.player)
     renderer = BlazerArenaRenderer(fullscreen=args.fullscreen)
 
+    # 4. Background Network Dispatch Client
+    net_client = StationNetworkClient(station="B", server_url=args.server)
+    net_client.start()
+    if net_client.server_url:
+        print(f"[Station B] Connected to Laptop 3 Server: {net_client.server_url}")
+
     # Audio State Trackers
     prev_locked = False
     prev_skips = 0
@@ -108,6 +116,32 @@ def main() -> None:
         running = True
         while running:
             dt = clock.tick(60) / 1000.0
+
+            # Auto-dispatch next player from Laptop 3 queue if waiting or tournament ended
+            curr_tp_str = str(getattr(engine, "tournament_phase", ""))
+            if curr_tp_str in ("waiting", "completed") or score_saved:
+                dispatched = net_client.pop_next_player()
+                if dispatched:
+                    new_pid = dispatched["player_id"]
+                    new_name = dispatched.get("name", "")
+                    print(f"[Station B] Auto-dispatching next player from queue: {new_name} ({new_pid})")
+                    engine.start_game(player_id=new_pid)
+                    score_saved = False
+                    prev_locked = False
+                    prev_skips = 0
+                    prev_stage = 1
+                    last_tick_sec = -1
+                    sounds.play_game_start()
+                    sounds.play_stage_start(1)
+                    if new_name:
+                        sounds.say(f"Welcome {new_name}. Step into frame.")
+
+            # Update live station heartbeat
+            net_client.update_status(
+                status=curr_tp_str,
+                player_id=engine.state.player_id,
+                score=engine.state.score,
+            )
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -244,6 +278,7 @@ def main() -> None:
             )
 
     finally:
+        net_client.stop()
         sounds.stop_all()
         provider.stop()
         pygame.quit()

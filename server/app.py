@@ -95,6 +95,19 @@ def _load_seen_event_ids() -> None:
 
 _load_seen_event_ids()
 
+import collections
+import time
+
+_station_queues: dict[str, collections.deque[dict]] = {
+    "A": collections.deque(),
+    "B": collections.deque(),
+}
+
+_station_status: dict[str, dict] = {
+    "A": {"status": "idle", "player_id": None, "score": None, "last_heartbeat": 0.0},
+    "B": {"status": "idle", "player_id": None, "score": None, "last_heartbeat": 0.0},
+}
+
 
 class ScoreIn(BaseModel):
     event_id: str
@@ -114,6 +127,7 @@ class PlayerCreate(BaseModel):
     roll_no: str | None = None
     height_cm: float | None = None
     photo_base64: str | None = None
+    station: str | None = None  # "A" or "B" for direct queue dispatch
 
 
 class PlayerOut(BaseModel):
@@ -122,6 +136,18 @@ class PlayerOut(BaseModel):
     roll_no: str | None = None
     height_cm: float | None = None
     photo_url: str | None = None
+    queued_station: str | None = None
+
+
+class QueueJoin(BaseModel):
+    player_id: str
+    station: str  # "A" or "B"
+
+
+class StationHeartbeat(BaseModel):
+    status: str = "idle"  # "idle" | "playing" | "result"
+    player_id: str | None = None
+    score: int | None = None
 
 
 def _read_scores_locked() -> list[dict]:
@@ -209,17 +235,122 @@ def register_player(player_in: PlayerCreate, request: Request) -> Any:
             except Exception:
                 photo_url = None
 
+        queued_station: str | None = None
+        if player_in.station and player_in.station.strip().upper() in ("A", "B"):
+            queued_station = player_in.station.strip().upper()
+            _station_queues[queued_station].append({
+                "player_id": player_id,
+                "name": clean_name,
+                "height_cm": player_in.height_cm,
+                "enqueued_at": time.time(),
+            })
+
         profile = {
             "player_id": player_id,
             "name": clean_name,
             "roll_no": clean_roll,
             "height_cm": player_in.height_cm,
             "photo_url": photo_url,
+            "queued_station": queued_station,
         }
         players.append(profile)
         _write_players_locked(players)
     _trigger_bg_upload(player_id)
     return profile
+
+
+@app.post("/api/queue/join")
+def join_station_queue(item: QueueJoin) -> dict:
+    """Explicitly route a player into Station A or B's queue."""
+    station = item.station.strip().upper()
+    if station not in ("A", "B"):
+        raise HTTPException(status_code=400, detail="Station must be 'A' or 'B'")
+    with _lock:
+        players = _read_players_locked()
+        player = next((p for p in players if p.get("player_id") == item.player_id), None)
+        if not player:
+            raise HTTPException(status_code=404, detail=f"Player '{item.player_id}' not found")
+        # Enqueue if not already in queue
+        already_in = any(q["player_id"] == item.player_id for q in _station_queues[station])
+        if not already_in:
+            _station_queues[station].append({
+                "player_id": player["player_id"],
+                "name": player.get("name", ""),
+                "height_cm": player.get("height_cm"),
+                "enqueued_at": time.time(),
+            })
+        queue_pos = len(_station_queues[station])
+    return {
+        "ok": True,
+        "station": station,
+        "player_id": item.player_id,
+        "position": queue_pos,
+    }
+
+
+@app.get("/api/queue/{station}/next")
+def get_next_queued_player(station: str) -> dict:
+    """Non-blocking pop: Station A/B retrieves the next player when idle."""
+    st = station.strip().upper()
+    if st not in ("A", "B"):
+        raise HTTPException(status_code=400, detail="Station must be 'A' or 'B'")
+    with _lock:
+        if _station_queues[st]:
+            player = _station_queues[st].popleft()
+            return {"player": player, "remaining": len(_station_queues[st])}
+        return {"player": None, "remaining": 0}
+
+
+@app.get("/api/queue/{station}")
+def view_station_queue(station: str) -> dict:
+    """Inspect queue for Station A or B."""
+    st = station.strip().upper()
+    if st not in ("A", "B"):
+        raise HTTPException(status_code=400, detail="Station must be 'A' or 'B'")
+    with _lock:
+        queue_list = list(_station_queues[st])
+    return {"station": st, "queue": queue_list, "total": len(queue_list)}
+
+
+@app.post("/api/queue/{station}/heartbeat")
+def record_station_heartbeat(station: str, hb: StationHeartbeat) -> dict:
+    """Station A/B reports live state (idle, playing, result) and current player."""
+    st = station.strip().upper()
+    if st not in ("A", "B"):
+        raise HTTPException(status_code=400, detail="Station must be 'A' or 'B'")
+    now = time.time()
+    with _lock:
+        _station_status[st] = {
+            "status": hb.status,
+            "player_id": hb.player_id,
+            "score": hb.score,
+            "last_heartbeat": now,
+        }
+        queue_len = len(_station_queues[st])
+    return {"ok": True, "station": st, "queue_len": queue_len}
+
+
+@app.get("/api/stations")
+def get_all_stations_status() -> dict:
+    """Live monitor of both game stations for the Laptop 3 operator dashboard."""
+    now = time.time()
+    out = {}
+    with _lock:
+        for st in ("A", "B"):
+            info = _station_status.get(st, {})
+            last_hb = info.get("last_heartbeat", 0.0)
+            is_online = (now - last_hb) <= 5.0
+            out[st] = {
+                "station": st,
+                "name": "Floor is Lava" if st == "A" else "Pose Blazer",
+                "online": is_online,
+                "status": info.get("status", "idle") if is_online else "offline",
+                "current_player": info.get("player_id"),
+                "current_score": info.get("score"),
+                "queue_len": len(_station_queues[st]),
+                "last_seen_s_ago": round(now - last_hb, 1) if last_hb > 0 else None,
+            }
+    return out
 
 
 @app.get("/api/players", response_model=list[PlayerOut])
@@ -1783,6 +1914,14 @@ def operator_desk(request: Request) -> str:
 <header>
   <div class="header-inner">
     <div class="brand-title">TITANS' ARCADE</div>
+    <div style="display: flex; gap: 10px; align-items: center;">
+      <div id="pill-sta-a" style="font-family: var(--font-pixel); font-size: 11px; padding: 4px 10px; border-radius: 4px; border: 1px solid #777; background: rgba(0,0,0,0.3); color: #ccc;">
+        🌋 STA-A (LAVA): <span id="text-sta-a" style="color: var(--sunset-gold); font-weight: 800;">OFFLINE</span>
+      </div>
+      <div id="pill-sta-b" style="font-family: var(--font-pixel); font-size: 11px; padding: 4px 10px; border-radius: 4px; border: 1px solid #777; background: rgba(0,0,0,0.3); color: #ccc;">
+        ⚡ STA-B (BLAZER): <span id="text-sta-b" style="color: var(--neon-cyan); font-weight: 800;">OFFLINE</span>
+      </div>
+    </div>
     <div class="header-right">
       <div class="live-status">
         <span class="live-dot"></span>
@@ -1839,6 +1978,20 @@ def operator_desk(request: Request) -> str:
         </div>
       </div>
 
+      <div class="form-group" style="margin-top: 10px; margin-bottom: 12px;">
+        <label>ASSIGN GAME STATION</label>
+        <div style="display: flex; gap: 10px;">
+          <label style="flex: 1; cursor: pointer; display: flex; align-items: center; gap: 8px; background: #201138; padding: 10px 12px; border: 2px solid var(--sunset-gold); border-radius: 6px; font-family: var(--font-pixel); font-size: 11px;">
+            <input type="radio" name="target-station" value="A" checked style="accent-color: var(--sunset-gold);">
+            <span>🌋 STATION A (LAVA)</span>
+          </label>
+          <label style="flex: 1; cursor: pointer; display: flex; align-items: center; gap: 8px; background: #201138; padding: 10px 12px; border: 2px solid var(--neon-cyan); border-radius: 6px; font-family: var(--font-pixel); font-size: 11px;">
+            <input type="radio" name="target-station" value="B" style="accent-color: var(--neon-cyan);">
+            <span>⚡ STATION B (BLAZER)</span>
+          </label>
+        </div>
+      </div>
+
       <div class="btn-group">
         <button id="btn-snap-register" class="btn-primary" type="button">Snap &amp; Register Player</button>
         <button id="btn-skip-photo" class="btn-secondary" type="button">Register Without Photo</button>
@@ -1849,7 +2002,7 @@ def operator_desk(request: Request) -> str:
         <div class="reg-tag" id="reg-pid">P001</div>
         <div style="font-size: 13px; font-weight: 700; color: #fff;" id="reg-name">Name: Ravi</div>
         <div style="font-size: 12px; color: #fbcfe8;" id="reg-roll">URN: 24303192</div>
-        <div style="font-size: 11px; color: var(--neon-cyan); margin-top: 6px;">
+        <div style="font-size: 11px; color: var(--neon-cyan); margin-top: 6px;" id="reg-station-notice">
           Send player to Station A or Station B with this ID!
         </div>
         <div id="reg-qr-section" style="margin-top: 12px; padding: 10px; background: #201138; border: 1px solid #5a3c8c; border-radius: 6px; text-align: center;">
@@ -1899,7 +2052,8 @@ def operator_desk(request: Request) -> str:
               <th>NAME</th>
               <th>URN</th>
               <th>HEIGHT</th>
-              <th style="width: 100px; text-align: center;">PHOTOCARD</th>
+              <th style="width: 110px; text-align: center;">DISPATCH</th>
+              <th style="width: 90px; text-align: center;">PHOTOCARD</th>
             </tr>
           </thead>
           <tbody id="roster-body">
@@ -1986,6 +2140,7 @@ def operator_desk(request: Request) -> str:
     const roll_no = rollInput.value.trim() || null;
     const height_cm = heightInput.value ? parseFloat(heightInput.value) : null;
     const photo_base64 = withPhoto ? capturePhotoBase64() : null;
+    const targetStation = document.querySelector('input[name="target-station"]:checked')?.value || 'A';
 
     const urlPin = new URLSearchParams(window.location.search).get('pin');
     const reqHeaders = { 'Content-Type': 'application/json' };
@@ -1997,7 +2152,7 @@ def operator_desk(request: Request) -> str:
       const res = await fetch('/api/players', {
         method: 'POST',
         headers: reqHeaders,
-        body: JSON.stringify({ name, roll_no, height_cm, photo_base64 })
+        body: JSON.stringify({ name, roll_no, height_cm, photo_base64, station: targetStation })
       });
 
       if (res.status === 409) {
@@ -2042,6 +2197,13 @@ def operator_desk(request: Request) -> str:
       document.getElementById('reg-roll').textContent = 'URN: ' + (data.roll_no || 'None');
       document.getElementById('reg-qr-img').src = '/api/qr/' + data.player_id + '?t=' + Date.now();
       document.getElementById('reg-card-link').href = '/api/cards/' + data.player_id + '/download';
+
+      const stName = data.queued_station === 'B' ? '⚡ Station B (Pose Blazer)' : '🌋 Station A (Floor is Lava)';
+      const stNotice = document.getElementById('reg-station-notice');
+      if (stNotice) {
+        stNotice.textContent = '✓ Automatically dispatched to ' + stName + ' queue!';
+      }
+
       document.getElementById('reg-success').style.display = 'block';
 
       nameInput.value = '';
@@ -2050,6 +2212,7 @@ def operator_desk(request: Request) -> str:
       nameInput.focus();
 
       loadRoster();
+      pollStations();
     } catch (err) {
       alert("Error registering player: " + err.message);
     }
@@ -2057,6 +2220,67 @@ def operator_desk(request: Request) -> str:
 
   document.getElementById('btn-snap-register').addEventListener('click', () => handleRegister(true));
   document.getElementById('btn-skip-photo').addEventListener('click', () => handleRegister(false));
+
+  async function dispatchExistingPlayer(pid, station) {
+    try {
+      const res = await fetch('/api/queue/join', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ player_id: pid, station })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const stName = station === 'B' ? 'Station B (Blazer)' : 'Station A (Lava)';
+        alert('Enqueued ' + pid + ' to ' + stName + ' (Position ' + data.position + ')');
+        pollStations();
+      } else {
+        alert('Could not enqueue: ' + res.statusText);
+      }
+    } catch (e) {
+      alert('Error enqueuing: ' + e.message);
+    }
+  }
+
+  async function pollStations() {
+    try {
+      const res = await fetch('/api/stations');
+      if (res.ok) {
+        const data = await res.json();
+        const a = data.A;
+        const b = data.B;
+        const pillA = document.getElementById('pill-sta-a');
+        const textA = document.getElementById('text-sta-a');
+        const pillB = document.getElementById('pill-sta-b');
+        const textB = document.getElementById('text-sta-b');
+
+        if (a && textA && pillA) {
+          if (a.online) {
+            pillA.style.borderColor = 'var(--retro-green)';
+            textA.textContent = a.status.toUpperCase() + (a.queue_len > 0 ? ' (Q:' + a.queue_len + ')' : '');
+            textA.style.color = a.status === 'playing' ? 'var(--sunset-pink)' : 'var(--retro-green)';
+          } else {
+            pillA.style.borderColor = '#555';
+            textA.textContent = 'OFFLINE';
+            textA.style.color = '#888';
+          }
+        }
+
+        if (b && textB && pillB) {
+          if (b.online) {
+            pillB.style.borderColor = 'var(--neon-cyan)';
+            textB.textContent = b.status.toUpperCase() + (b.queue_len > 0 ? ' (Q:' + b.queue_len + ')' : '');
+            textB.style.color = b.status === 'playing' ? 'var(--sunset-pink)' : 'var(--neon-cyan)';
+          } else {
+            pillB.style.borderColor = '#555';
+            textB.textContent = 'OFFLINE';
+            textB.style.color = '#888';
+          }
+        }
+      }
+    } catch (e) {}
+  }
+  setInterval(pollStations, 2000);
+  pollStations();
 
   async function loadRoster() {
     try {
@@ -2106,6 +2330,10 @@ def operator_desk(request: Request) -> str:
         <td style="font-weight: 700; color: #fff;">${p.name}</td>
         <td>${rollHtml}</td>
         <td>${heightHtml}</td>
+        <td style="text-align: center; white-space: nowrap;">
+          <button onclick="dispatchExistingPlayer('${p.player_id}', 'A')" style="background: rgba(255,209,82,0.2); border: 1px solid var(--sunset-gold); color: var(--sunset-gold); border-radius: 4px; padding: 3px 6px; font-family: var(--font-pixel); font-size: 10px; cursor: pointer; margin-right: 4px;" title="Send to Station A (Lava)">🌋 A</button>
+          <button onclick="dispatchExistingPlayer('${p.player_id}', 'B')" style="background: rgba(0,240,255,0.2); border: 1px solid var(--neon-cyan); color: var(--neon-cyan); border-radius: 4px; padding: 3px 6px; font-family: var(--font-pixel); font-size: 10px; cursor: pointer;" title="Send to Station B (Blazer)">⚡ B</button>
+        </td>
         <td style="text-align: center;">
           <button class="btn-action-qr" type="button" title="Open Photocard QR &amp; Download" onclick="openQrModal('${p.player_id}', '${p.name.replace(/'/g, "\\'")}')">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display: block;">

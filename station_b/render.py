@@ -399,9 +399,9 @@ class BlazerArenaRenderer:
         self._draw_cyber_frame(self.screen, (cam_x, cam_y, cam_w, cam_h), (80, 110, 150))
 
         # ----------------------------------------------------------------------
-        # 4. Skip Gesture Feedback Bar (Folded Arms)
+        # 4. Skip Gesture Feedback Bar (Hand on Head)
         # ----------------------------------------------------------------------
-        if engine.skip_hold_s > 0.05:
+        if engine.skip_hold_s > 0.03:
             skip_w = int(cam_w * 0.44)
             skip_h = 24
             sx = cam_x + 16
@@ -411,13 +411,14 @@ class BlazerArenaRenderer:
             s_bg.fill((20, 10, 12, 230))
             self.screen.blit(s_bg, (sx, sy))
 
-            pct_skip = min(1.0, engine.skip_hold_s / 1.0)
+            skip_req = 0.40 if getattr(engine, "current_round", 1) == 2 else 0.50
+            pct_skip = min(1.0, engine.skip_hold_s / skip_req)
             fill_sw = int(skip_w * pct_skip)
             pygame.draw.rect(self.screen, (255, 140, 20), (sx, sy, fill_sw, skip_h))
             pygame.draw.rect(self.screen, (255, 80, 80), (sx, sy, skip_w, skip_h), 2)
 
             skip_txt = render_pixel_text(
-                f"HOLDING ARMS TO SKIP... {int(pct_skip * 100)}%",
+                f"HAND ON HEAD: SKIPPING... {int(pct_skip * 100)}%",
                 scale=1,
                 top_color=(255, 255, 255),
                 bottom_color=(255, 200, 200),

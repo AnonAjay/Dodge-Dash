@@ -16,6 +16,7 @@ import pygame
 from pose_core.capture import CameraPoseSource
 from pose_core.floor_map import FloorMapper
 from shared.contracts import Phase, PoseProvider, ScoreEvent
+from shared.station_client import StationNetworkClient
 from station_a.keyboard_input import KeyboardPoseProvider
 from station_a.logic import LavaEngine, ROUND_DURATION_S, TournamentPhase
 from station_a.outbox import enqueue_score
@@ -29,6 +30,7 @@ def main() -> None:
     parser.add_argument("--camera", type=int, default=0, help="Camera device index (default: 0)")
     parser.add_argument("--duration", type=float, default=ROUND_DURATION_S, help="Round duration in seconds (default: 30)")
     parser.add_argument("--player", type=str, default="P001", help="Player ID (default: P001)")
+    parser.add_argument("--server", type=str, default=None, help="Laptop 3 server URL (e.g. http://192.168.43.10:8000)")
     parser.add_argument("--fullscreen", action="store_true", help="Launch in full-screen display mode")
     args = parser.parse_args()
 
@@ -67,6 +69,12 @@ def main() -> None:
     engine = LavaEngine(duration_s=args.duration, arena_w_m=arena_w, arena_h_m=arena_h)
     engine.start_game(player_id=args.player)
 
+    # 4. Background Network Dispatch Client
+    net_client = StationNetworkClient(station="A", server_url=args.server)
+    net_client.start()
+    if net_client.server_url:
+        print(f"[Station A] Connected to Laptop 3 Server: {net_client.server_url}")
+
     renderer = LavaArenaRenderer(mapper=mapper, arena_w_m=arena_w, arena_h_m=arena_h, fullscreen=args.fullscreen)
     clock = pygame.time.Clock()
 
@@ -78,6 +86,23 @@ def main() -> None:
         running = True
         while running:
             dt = clock.tick(60) / 1000.0
+
+            # Auto-launch dispatched player from Laptop 3 queue if idle / round ended
+            if engine.state.phase in (Phase.IDLE, Phase.RESULT) or score_saved:
+                dispatched = net_client.pop_next_player()
+                if dispatched:
+                    new_pid = dispatched["player_id"]
+                    new_name = dispatched.get("name", "")
+                    print(f"[Station A] Auto-dispatching next player from queue: {new_name} ({new_pid})")
+                    engine.start_game(player_id=new_pid)
+                    score_saved = False
+
+            # Update live station heartbeat
+            net_client.update_status(
+                status=engine.state.phase.value,
+                player_id=engine.state.player_id,
+                score=engine.state.score,
+            )
 
             # Handle window and keyboard events
             for event in pygame.event.get():
@@ -151,6 +176,7 @@ def main() -> None:
             )
 
     finally:
+        net_client.stop()
         provider.stop()
         pygame.quit()
         print("[Station A] Closed cleanly.")

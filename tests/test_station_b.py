@@ -85,8 +85,8 @@ def test_station_b_folded_arms_skip():
         "right_elbow": 75.0,
     }
 
-    # Hold folded arms for 1.1s (exceeding 1.0s requirement)
-    for _ in range(11):
+    # Hold skip gesture for 0.6s (exceeding 0.5s requirement)
+    for _ in range(6):
         engine.update(pose, dt=0.1, player_angles=folded_angles)
 
     assert engine.consecutive_skips == 1
@@ -100,7 +100,6 @@ def test_station_b_elimination_after_4_skips():
     engine.start_game("P001")
     engine.tournament_phase = "active"
 
-
     pose = PoseFrame(tracked=True)
     folded_angles = {
         "left_shoulder": 20.0,
@@ -110,11 +109,11 @@ def test_station_b_elimination_after_4_skips():
     }
 
     for skip_idx in range(1, 5):
-        for _ in range(11):  # 1.1s folded arms
+        for _ in range(6):  # 0.6s hold (exceeds 0.5s)
             engine.update(pose, dt=0.1, player_angles=folded_angles)
         assert engine.consecutive_skips == skip_idx
         if skip_idx < 4:
-            for _ in range(11):  # cooldown between poses
+            for _ in range(6):  # cooldown between poses
                 engine.update(pose, dt=0.1)
 
     # 4 consecutive skips triggers instant disqualification

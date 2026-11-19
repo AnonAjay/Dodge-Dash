@@ -244,3 +244,64 @@ def test_blank_urn_allowance(client):
 
     players = client.get("/api/players").json()
     assert len(players) == 3
+
+
+def test_station_queue_join_and_pop(client):
+    # Register player
+    p1 = client.post("/api/players", json={"name": "Aarav", "height_cm": 175.0}).json()
+    pid = p1["player_id"]
+
+    # Join queue for Station A
+    res_join = client.post("/api/queue/join", json={"player_id": pid, "station": "A"})
+    assert res_join.status_code == 200
+    assert res_join.json()["ok"] is True
+    assert res_join.json()["position"] == 1
+
+    # Check station status
+    stations = client.get("/api/stations").json()
+    assert stations["A"]["queue_len"] == 1
+
+    # Station A pops next player
+    next_res = client.get("/api/queue/A/next").json()
+    assert next_res["player"] is not None
+    assert next_res["player"]["player_id"] == pid
+    assert next_res["player"]["name"] == "Aarav"
+
+    # Next pop is empty
+    empty_res = client.get("/api/queue/A/next").json()
+    assert empty_res["player"] is None
+    assert empty_res["remaining"] == 0
+
+
+def test_station_heartbeat_and_live_status(client):
+    # Send heartbeat from Station B
+    hb_res = client.post("/api/queue/B/heartbeat", json={
+        "status": "playing",
+        "player_id": "P005",
+        "score": 1250,
+    })
+    assert hb_res.status_code == 200
+    assert hb_res.json()["ok"] is True
+
+    # Verify /api/stations reflects Station B online and playing
+    stations = client.get("/api/stations").json()
+    assert stations["B"]["online"] is True
+    assert stations["B"]["status"] == "playing"
+    assert stations["B"]["current_player"] == "P005"
+    assert stations["B"]["current_score"] == 1250
+
+
+def test_player_registration_with_station_dispatch(client):
+    # Register with station parameter
+    p = client.post("/api/players", json={
+        "name": "Karan",
+        "station": "B"
+    }).json()
+    assert p["player_id"] == "P001"
+    assert p["queued_station"] == "B"
+
+    # Verify automatically in Station B queue
+    next_b = client.get("/api/queue/B/next").json()
+    assert next_b["player"]["player_id"] == "P001"
+    assert next_b["player"]["name"] == "Karan"
+

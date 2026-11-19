@@ -512,15 +512,15 @@ def test_blazer_skip_and_consecutive_elimination():
         "right_elbow": 75.0,
     }
 
-    # 1. Holding folded arms for 0.5s does not skip prematurely
-    for _ in range(5):
+    # 1. Holding skip gesture for 0.3s does not skip prematurely (< 0.5s threshold)
+    for _ in range(3):
         engine.update(pose_frame, dt=0.1, player_angles=folded_angles)
     assert engine.round_number == 1
     assert engine.consecutive_skips == 0
     assert "HOLDING TO SKIP" in engine.banner_msg
 
-    # 2. Advance another 0.6s (total > 1.0s) -> triggers skip!
-    for _ in range(6):
+    # 2. Advance another 0.3s (total 0.6s > 0.5s hold requirement) -> triggers skip!
+    for _ in range(3):
         engine.update(pose_frame, dt=0.1, player_angles=folded_angles)
     assert engine.consecutive_skips == 1
     assert "SKIPPED" in engine.banner_msg
@@ -633,5 +633,22 @@ def test_normal_standing_never_passes_and_red_key_fails():
     # Even though 5 of 6 limbs are 100% green:
     assert res_lazy.joint_status["left_elbow"] == "off"
     assert res_lazy.is_matched is False
+
+
+def test_hand_on_head_gesture_detection():
+    from station_b.logic import is_hand_on_head
+
+    # Create dummy 33 landmarks where nose is at (0.50, 0.25) and right wrist is on head crown at (0.50, 0.15)
+    lms = [[0.5, 0.5, 1.0] for _ in range(33)]
+    lms[0] = [0.50, 0.25, 1.0]   # NOSE
+    lms[16] = [0.50, 0.15, 1.0]  # R_WRIST directly on head crown
+    angles = {"right_elbow": 75.0, "right_shoulder": 60.0}
+
+    assert is_hand_on_head(angles, lms) is True
+
+    # When right hand is down by hip (y=0.60):
+    lms[16] = [0.50, 0.60, 1.0]
+    assert is_hand_on_head(angles, lms) is False
+
 
 
