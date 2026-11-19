@@ -251,5 +251,51 @@ def test_round_3_final_round_transition_and_scoring():
     assert state.score == 20
 
 
+def test_round_default_duration_and_stage_splits():
+    from shared.contracts import Phase
+
+    # 1. Default initialization
+    engine = LavaEngine()
+    assert engine.duration_s == 60.0
+    assert engine.state.time_left_s == 60.0
+
+    # 2. Start / restart resets to 60.0s
+    engine.state.time_left_s = 15.0
+    engine.start_game("P001")
+    assert engine.state.time_left_s == 60.0
+    assert engine.current_round == 1
+    assert engine.round_multiplier == 1.0
+
+    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9, airborne=False)
+
+    # 3. Round 1 Warmup: 60s -> 40s (e.g. at 50s left)
+    engine.state.time_left_s = 50.0
+    state, _ = engine.update(pose, dt=0.01)
+    assert engine.current_round == 1
+    assert engine.round_multiplier == 1.0
+    assert state.phase == Phase.PLAYING
+
+    # 4. Round 2 Chaos Shapes: 40s -> 20s (e.g. at 30s left)
+    engine.state.time_left_s = 30.0
+    state, _ = engine.update(pose, dt=0.01)
+    assert engine.current_round == 2
+    assert engine.round_multiplier == 1.5
+    assert state.phase == Phase.PLAYING
+
+    # 5. Final Round Sudden Surge: 20s -> 0s (e.g. at 10s left)
+    engine.state.time_left_s = 10.0
+    state, _ = engine.update(pose, dt=0.01)
+    assert engine.current_round == 3
+    assert engine.round_multiplier == 2.0
+    assert state.phase == Phase.PLAYING
+
+    # 6. Expiry at 0s transitions to Phase.RESULT
+    engine.state.time_left_s = 0.05
+    state, wave = engine.update(pose, dt=0.1)
+    assert state.phase == Phase.RESULT
+    assert state.time_left_s == 0.0
+    assert wave is None
+
+
 
 

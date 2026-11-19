@@ -28,8 +28,152 @@ from station_a.logic import GRID_SIZE, LavaWave
 # Base Window Geometry
 DEFAULT_WIDTH = 1024
 DEFAULT_HEIGHT = 768
-HUD_TOP_H = 65
-HUD_BOT_H = 45
+HUD_TOP_H = 76
+HUD_BOT_H = 50
+DEFAULT_ROUND_DURATION_S = 60.0
+
+# ==============================================================================
+# RETRO 8-BIT PIXEL BITMAP FONT RENDERER (TITANS' ARCADE)
+# ==============================================================================
+PIXEL_GLYPHS: dict[str, list[str]] = {
+    "A": [" ### ", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"],
+    "B": ["#### ", "#   #", "#   #", "#### ", "#   #", "#   #", "#### "],
+    "C": [" ####", "#    ", "#    ", "#    ", "#    ", "#    ", " ####"],
+    "D": ["#### ", "#   #", "#   #", "#   #", "#   #", "#   #", "#### "],
+    "E": ["#####", "#    ", "#    ", "#### ", "#    ", "#    ", "#####"],
+    "F": ["#####", "#    ", "#    ", "#### ", "#    ", "#    ", "#    "],
+    "G": [" ####", "#    ", "#    ", "# ###", "#   #", "#   #", " ####"],
+    "H": ["#   #", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"],
+    "I": ["###", " # ", " # ", " # ", " # ", " # ", "###"],
+    "J": ["  ###", "    #", "    #", "    #", "    #", "#   #", " ### "],
+    "K": ["#   #", "#  # ", "# #  ", "##   ", "# #  ", "#  # ", "#   #"],
+    "L": ["#    ", "#    ", "#    ", "#    ", "#    ", "#    ", "#####"],
+    "M": ["#   #", "## ##", "# # #", "#   #", "#   #", "#   #", "#   #"],
+    "N": ["#   #", "##  #", "# # #", "#  ##", "#   #", "#   #", "#   #"],
+    "O": [" ### ", "#   #", "#   #", "#   #", "#   #", "#   #", " ### "],
+    "P": ["#### ", "#   #", "#   #", "#### ", "#    ", "#    ", "#    "],
+    "Q": [" ### ", "#   #", "#   #", "#   #", "# # #", "#  ##", " ####"],
+    "R": ["#### ", "#   #", "#   #", "#### ", "#  # ", "#   #", "#   #"],
+    "S": [" ####", "#    ", "#    ", " ### ", "    #", "    #", "#### "],
+    "T": ["#####", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  "],
+    "U": ["#   #", "#   #", "#   #", "#   #", "#   #", "#   #", " ### "],
+    "V": ["#   #", "#   #", "#   #", "#   #", "#   #", " # # ", "  #  "],
+    "W": ["#   #", "#   #", "#   #", "# # #", "# # #", "## ##", "#   #"],
+    "X": ["#   #", "#   #", " # # ", "  #  ", " # # ", "#   #", "#   #"],
+    "Y": ["#   #", "#   #", " # # ", "  #  ", "  #  ", "  #  ", "  #  "],
+    "Z": ["#####", "    #", "   # ", "  #  ", " #   ", "#    ", "#####"],
+    "0": [" ### ", "#  ##", "# # #", "# # #", "##  #", "#   #", " ### "],
+    "1": [" ## ", "  # ", "  # ", "  # ", "  # ", "  # ", " ###"],
+    "2": [" ### ", "#   #", "    #", "  ## ", " #   ", "#    ", "#####"],
+    "3": ["#### ", "    #", "    #", " ### ", "    #", "    #", "#### "],
+    "4": ["#   #", "#   #", "#   #", "#####", "    #", "    #", "    #"],
+    "5": ["#####", "#    ", "#    ", "#### ", "    #", "    #", "#### "],
+    "6": [" ### ", "#    ", "#    ", "#### ", "#   #", "#   #", " ### "],
+    "7": ["#####", "    #", "   # ", "  #  ", " #   ", " #   ", " #   "],
+    "8": [" ### ", "#   #", "#   #", " ### ", "#   #", "#   #", " ### "],
+    "9": [" ### ", "#   #", "#   #", " ####", "    #", "    #", " ### "],
+    ":": [" ", "#", " ", " ", "#", " ", " "],
+    "!": ["#", "#", "#", "#", "#", " ", "#"],
+    "?": ["### ", "   #", "  # ", " #  ", " #  ", "    ", " #  "],
+    ".": [" ", " ", " ", " ", " ", "#", "#"],
+    ",": [" ", " ", " ", " ", " ", " #", "# "],
+    "-": ["   ", "   ", "   ", "###", "   ", "   ", "   "],
+    "/": ["    #", "   # ", "   # ", "  #  ", " #   ", " #   ", "#    "],
+    "(": ["  #", " # ", "#  ", "#  ", "#  ", " # ", "  #"],
+    ")": ["#  ", " # ", "  #", "  #", "  #", " # ", "#  "],
+    "[": ["###", "#  ", "#  ", "#  ", "#  ", "#  ", "###"],
+    "]": ["###", "  #", "  #", "  #", "  #", "  #", "###"],
+    "+": ["   ", " # ", " # ", "###", " # ", " # ", "   "],
+    "|": ["#", "#", "#", "#", "#", "#", "#"],
+    "%": ["#   #", "#  # ", "  #  ", " #  #", "#   #", "    #", "    #"],
+    "'": ["#", "#", " ", " ", " ", " ", " "],
+    "\"": ["# #", "# #", "   ", "   ", "   ", "   ", "   "],
+    "&": [" ### ", "#   #", " # # ", "  #  ", "# # #", "#  # ", " ## #"],
+    "<": ["   #", "  # ", " #  ", "#   ", " #  ", "  # ", "   #"],
+    ">": ["#   ", " #  ", "  # ", "   #", "  # ", " #  ", "#   "],
+    " ": ["   ", "   ", "   ", "   ", "   ", "   ", "   "],
+}
+
+_PIXEL_TEXT_CACHE: dict[tuple, pygame.Surface] = {}
+
+
+def render_pixel_text(
+    text: str,
+    scale: int = 3,
+    top_color: tuple[int, int, int] = (255, 224, 51),
+    bottom_color: tuple[int, int, int] = (232, 56, 24),
+    outline_color: tuple[int, int, int] | None = (18, 10, 32),
+    shadow_offset: int = 3,
+) -> pygame.Surface:
+    """Render crisp retro arcade pixel text with signature two-tone sunset gradient,
+    thick dark pixel outline, and drop shadow. Uses scaled surface caching for ~0ms runtime."""
+    cache_key = (text, scale, top_color, bottom_color, outline_color, shadow_offset)
+    if cache_key in _PIXEL_TEXT_CACHE:
+        return _PIXEL_TEXT_CACHE[cache_key]
+
+    up_text = text.upper()
+    cols = []
+    for ch in up_text:
+        glyph = PIXEL_GLYPHS.get(ch, PIXEL_GLYPHS["?"])
+        gw = len(glyph[0])
+        cols.append((glyph, gw))
+
+    spacing = 1
+    total_w = sum(gw for _, gw in cols) + max(0, len(cols) - 1) * spacing
+    if total_w <= 0:
+        total_w = 1
+
+    grid_w = total_w + 2
+    grid_h = 7 + 2
+
+    fg_map: dict[tuple[int, int], tuple[int, int, int]] = {}
+    curr_x = 1
+    for glyph, gw in cols:
+        for r, row_str in enumerate(glyph):
+            col_tone = top_color if r < 4 else bottom_color
+            for c, ch in enumerate(row_str):
+                if ch == "#":
+                    fg_map[(curr_x + c, 1 + r)] = col_tone
+        curr_x += gw + spacing
+
+    outline_set: set[tuple[int, int]] = set()
+    if outline_color is not None:
+        for (fx, fy) in fg_map:
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    nx, ny = fx + dx, fy + dy
+                    if 0 <= nx < grid_w and 0 <= ny < grid_h and (nx, ny) not in fg_map:
+                        outline_set.add((nx, ny))
+
+    surf_1x = pygame.Surface((grid_w, grid_h), pygame.SRCALPHA)
+    for (ox, oy) in outline_set:
+        surf_1x.set_at((ox, oy), (*outline_color, 255))
+    for (fx, fy), col in fg_map.items():
+        surf_1x.set_at((fx, fy), (*col, 255))
+
+    scaled_w = grid_w * scale
+    scaled_h = grid_h * scale
+    scaled_main = pygame.transform.scale(surf_1x, (scaled_w, scaled_h))
+
+    if shadow_offset > 0:
+        shadow_1x = pygame.Surface((grid_w, grid_h), pygame.SRCALPHA)
+        all_pts = outline_set.union(fg_map.keys())
+        shadow_col = (10, 5, 18, 220)
+        for (sx, sy) in all_pts:
+            shadow_1x.set_at((sx, sy), shadow_col)
+        scaled_shadow = pygame.transform.scale(shadow_1x, (scaled_w, scaled_h))
+
+        final_surf = pygame.Surface((scaled_w + shadow_offset, scaled_h + shadow_offset), pygame.SRCALPHA)
+        final_surf.blit(scaled_shadow, (shadow_offset, shadow_offset))
+        final_surf.blit(scaled_main, (0, 0))
+    else:
+        final_surf = scaled_main
+
+    _PIXEL_TEXT_CACHE[cache_key] = final_surf
+    return final_surf
+
 
 # Texture resolution for floor perspective warp
 TEX_SIZE = 400
@@ -329,7 +473,7 @@ class LavaArenaRenderer:
         self.screen = pygame.display.set_mode((DEFAULT_WIDTH, DEFAULT_HEIGHT), pygame.RESIZABLE)
         self._maximize_window()
 
-        pygame.display.set_caption("DODGE & DRIP — STATION A: FLOOR IS LAVA (AR)")
+        pygame.display.set_caption("TITANS' ARCADE — STATION A: FLOOR IS LAVA")
 
         # Precompute Perspective Transform Matrix
         self.warp_M = None
@@ -767,101 +911,121 @@ class LavaArenaRenderer:
         # 2. TOP HUD (SCORE, MULTIPLIER, STREAK, TIMER, ROUND BADGE)
         # ======================================================================
         hud_surface = pygame.Surface((win_w, HUD_TOP_H), pygame.SRCALPHA)
-        hud_surface.fill((12, 14, 18, 225))
+        hud_surface.fill((22, 12, 46, 195))
         self.screen.blit(hud_surface, (0, 0))
-        pygame.draw.line(self.screen, (45, 55, 75), (0, HUD_TOP_H), (win_w, HUD_TOP_H), 2)
+        # Glowing neon gold & coral borders
+        pygame.draw.line(self.screen, (255, 209, 82), (0, HUD_TOP_H), (win_w, HUD_TOP_H), 2)
+        pygame.draw.line(self.screen, (232, 56, 24, 120), (0, HUD_TOP_H - 1), (win_w, HUD_TOP_H - 1), 1)
 
-        # Title
-        title = self.font_title.render("STATION A: FLOOR IS LAVA", True, (255, 90, 30))
-        self.screen.blit(title, (24, 8))
+        # Top-Left: FLOOR IS LAVA (signature two-tone sunset pixel font)
+        title_surf = render_pixel_text("FLOOR IS LAVA", scale=3, top_color=(255, 224, 51), bottom_color=(232, 56, 24))
+        self.screen.blit(title_surf, (20, 10))
 
-        # Round Badge & Multiplier
-        if current_round == 1:
-            badge_str = "ROUND 1/3 (WARMUP) | MULT: x1.0"
-            badge_col = (0, 255, 120)
-        elif current_round == 2:
-            badge_str = "ROUND 2/3 (CHAOS)  | MULT: x1.5"
-            badge_col = (255, 180, 0)
-        else:
-            badge_str = "FINAL ROUND (SURGE)| MULT: x2.0"
-            badge_col = (255, 50, 50)
-        badge_surf = self.font_small.render(badge_str, True, badge_col)
-        self.screen.blit(badge_surf, (24, 38))
+        # Subtitle: TITANS' ARCADE | ROUND 1/3 | MULT x1.0 in neon cyan/mint
+        badge_str = f"TITANS' ARCADE | ROUND {current_round}/3 | MULT X{round_multiplier:.1f}"
+        badge_surf = render_pixel_text(badge_str, scale=2, top_color=(100, 245, 220), bottom_color=(0, 195, 175), shadow_offset=2)
+        self.screen.blit(badge_surf, (20, 46))
 
-        # Score & Combined Multiplier (Centered dynamically)
+        # Top-Center: SCORE: 0000 in two-tone gold/orange pixel font
         streak_mult = min(2.0, 1.0 + (state.streak // 5) * 0.1)
         total_mult = streak_mult * round_multiplier
-        score_x = max(340, win_w // 2 - 100)
-        score_txt = self.font_large.render(f"SCORE: {state.score:04d}", True, TEXT_GOLD)
-        self.screen.blit(score_txt, (score_x, 8))
+        score_surf = render_pixel_text(f"SCORE: {state.score:04d}", scale=3, top_color=(255, 224, 51), bottom_color=(255, 140, 20))
+        score_x = max(title_surf.get_width() + 35, win_w // 2 - score_surf.get_width() // 2)
+        self.screen.blit(score_surf, (score_x, 10))
 
-        streak_col = (0, 255, 160) if state.streak > 0 else TEXT_MUTED
-        streak_txt = self.font_small.render(f"STREAK: {state.streak} (x{streak_mult:.1f}) | DODGES: {state.dodges} | TOTAL: x{total_mult:.1f}", True, streak_col)
-        self.screen.blit(streak_txt, (score_x, 38))
+        # Streak & Dodges info strip
+        streak_str = f"STREAK: {state.streak}  |  DODGES: {state.dodges}  |  TOTAL: X{total_mult:.1f}"
+        streak_top = (255, 220, 100) if state.streak > 0 else (170, 185, 210)
+        streak_bot = (235, 140, 40) if state.streak > 0 else (120, 135, 160)
+        streak_surf = render_pixel_text(streak_str, scale=2, top_color=streak_top, bottom_color=streak_bot, shadow_offset=2)
+        streak_x = max(title_surf.get_width() + 35, win_w // 2 - streak_surf.get_width() // 2)
+        self.screen.blit(streak_surf, (streak_x, 46))
 
-        # Time Left (Right-aligned dynamically)
-        secs = max(0, int(state.time_left_s))
-        time_col = (255, 60, 60) if secs <= 10 else (0, 220, 255)
-        time_txt = self.font_large.render(f"{secs:02d}s", True, time_col)
-        self.screen.blit(time_txt, (win_w - 100, 10))
+        # Top-Right: Countdown Timer & Gauge (normalized to 60.0s round duration)
+        secs = max(0, int(math.ceil(state.time_left_s)))
+        if secs <= 10:
+            time_top = (255, 224, 51)
+            time_bot = (232, 56, 24)
+            bar_fill = (232, 56, 24)
+        else:
+            time_top = (100, 240, 255)
+            time_bot = (20, 140, 255)
+            bar_fill = (0, 220, 255)
 
-        # Time gauge bar
-        bar_w = 80
-        bar_h = 7
-        pct = max(0.0, min(1.0, state.time_left_s / 60.0))
-        pygame.draw.rect(self.screen, (35, 42, 54), (win_w - 105, 44, bar_w, bar_h))
-        pygame.draw.rect(self.screen, time_col, (win_w - 105, 44, int(bar_w * pct), bar_h))
+        timer_surf = render_pixel_text(f"{secs:02d}S", scale=3, top_color=time_top, bottom_color=time_bot)
+        t_x = win_w - timer_surf.get_width() - 24
+        self.screen.blit(timer_surf, (t_x, 10))
+
+        # Glowing neon timer gauge bar
+        bar_w = 90
+        bar_h = 8
+        pct = max(0.0, min(1.0, state.time_left_s / DEFAULT_ROUND_DURATION_S))
+        bar_x = win_w - bar_w - 24
+        bar_y = 48
+        pygame.draw.rect(self.screen, (35, 18, 65), (bar_x, bar_y, bar_w, bar_h))
+        if pct > 0:
+            pygame.draw.rect(self.screen, bar_fill, (bar_x, bar_y, int(bar_w * pct), bar_h))
+        pygame.draw.rect(self.screen, (255, 209, 82), (bar_x, bar_y, bar_w, bar_h), width=1)
 
         # ======================================================================
         # 3. CENTER-SCREEN STREET FIGHTER ARCADE ROUND BANNER
         # ======================================================================
         if round_timer > 0.0 and round_title:
             cy = win_h // 2
-            band_h = 130
-            # Dark letterbox strip across the center of the display
+            band_h = 140
             band_surface = pygame.Surface((win_w, band_h), pygame.SRCALPHA)
-            band_surface.fill((10, 12, 16, 220))
+            band_surface.fill((18, 10, 38, 220))
             self.screen.blit(band_surface, (0, cy - band_h // 2))
 
-            # Horizontal laser accent lines
-            pygame.draw.line(self.screen, round_color, (0, cy - band_h // 2), (win_w, cy - band_h // 2), 3)
-            pygame.draw.line(self.screen, round_color, (0, cy + band_h // 2), (win_w, cy + band_h // 2), 3)
+            # Double neon horizontal borders
+            pygame.draw.line(self.screen, (255, 209, 82), (0, cy - band_h // 2), (win_w, cy - band_h // 2), 2)
+            pygame.draw.line(self.screen, round_color, (0, cy - band_h // 2 + 3), (win_w, cy - band_h // 2 + 3), 1)
+            pygame.draw.line(self.screen, round_color, (0, cy + band_h // 2 - 3), (win_w, cy + band_h // 2 - 3), 1)
+            pygame.draw.line(self.screen, (255, 209, 82), (0, cy + band_h // 2), (win_w, cy + band_h // 2), 2)
 
-            # Huge Street Fighter Style Title with drop shadow
-            t_shadow = self.font_arcade_huge.render(round_title, True, (0, 0, 0))
-            t_surf = self.font_arcade_huge.render(round_title, True, round_color)
-            t_rect = t_surf.get_rect(center=(win_w // 2, cy - 20))
-            self.screen.blit(t_shadow, (t_rect.x + 3, t_rect.y + 3))
+            # Huge Street Fighter Style Title
+            t_surf = render_pixel_text(round_title, scale=5, top_color=(255, 224, 51), bottom_color=(232, 56, 24), shadow_offset=4)
+            t_rect = t_surf.get_rect(center=(win_w // 2, cy - 22))
             self.screen.blit(t_surf, t_rect)
 
-            # Subtitle with drop shadow
             if round_sub:
-                s_shadow = self.font_arcade_sub.render(round_sub, True, (0, 0, 0))
-                s_surf = self.font_arcade_sub.render(round_sub, True, (255, 255, 255))
+                s_surf = render_pixel_text(round_sub, scale=3, top_color=(245, 248, 255), bottom_color=(175, 195, 230), shadow_offset=2)
                 s_rect = s_surf.get_rect(center=(win_w // 2, cy + 32))
-                self.screen.blit(s_shadow, (s_rect.x + 2, s_rect.y + 2))
                 self.screen.blit(s_surf, s_rect)
 
         # ======================================================================
         # 4. BOTTOM EVENT BANNER & STATUS STRIP
         # ======================================================================
         bot_surface = pygame.Surface((win_w, HUD_BOT_H), pygame.SRCALPHA)
-        bot_surface.fill((12, 14, 18, 225))
+        bot_surface.fill((22, 12, 46, 195))
         self.screen.blit(bot_surface, (0, win_h - HUD_BOT_H))
-        pygame.draw.line(self.screen, (45, 55, 75), (0, win_h - HUD_BOT_H), (win_w, win_h - HUD_BOT_H), 2)
+        pygame.draw.line(self.screen, (255, 209, 82), (0, win_h - HUD_BOT_H), (win_w, win_h - HUD_BOT_H), 2)
+        pygame.draw.line(self.screen, (232, 56, 24, 120), (0, win_h - HUD_BOT_H + 1), (win_w, win_h - HUD_BOT_H + 1), 1)
 
         if banner_msg:
-            b_surf = self.font_mid.render(banner_msg, True, banner_color)
+            msg_up = banner_msg.upper()
+            if any(k in msg_up for k in ("SAFE", "DODGED", "IMMUNITY", "BONUS")):
+                top_col = (80, 255, 160)
+                bot_col = (0, 200, 100)
+            elif any(k in msg_up for k in ("HIT", "BURNT", "LAVA", "WARNING", "DANGER")):
+                top_col = (255, 224, 51)
+                bot_col = (232, 56, 24)
+            else:
+                top_col = banner_color
+                bot_col = banner_color
+            b_surf = render_pixel_text(banner_msg, scale=2, top_color=top_col, bottom_color=bot_col, shadow_offset=2)
             self.screen.blit(b_surf, b_surf.get_rect(center=(win_w // 2, win_h - HUD_BOT_H // 2)))
         else:
             status = "PLAYER TRACKED" if pose.tracked else "SEARCHING FOR FEET..."
-            status_col = (0, 255, 120) if pose.tracked else (255, 180, 0)
-            status_txt = self.font_small.render(f"{status}  |  60 FPS  |  [F11] FULLSCREEN", True, status_col)
-            self.screen.blit(status_txt, status_txt.get_rect(center=(win_w // 2, win_h - HUD_BOT_H // 2)))
+            st_top = (80, 255, 160) if pose.tracked else (255, 224, 51)
+            st_bot = (0, 200, 100) if pose.tracked else (232, 56, 24)
+            status_txt = f"{status}  |  60 FPS  |  [F11] FULLSCREEN"
+            status_surf = render_pixel_text(status_txt, scale=2, top_color=st_top, bottom_color=st_bot, shadow_offset=2)
+            self.screen.blit(status_surf, status_surf.get_rect(center=(win_w // 2, win_h - HUD_BOT_H // 2)))
 
         # Airborne Banner
         if pose.airborne:
-            jump_badge = self.font_large.render("AIRBORNE! JUMP IMMUNITY ACTIVE", True, (0, 240, 255))
+            jump_badge = render_pixel_text("AIRBORNE! JUMP IMMUNITY!", scale=3, top_color=(100, 250, 255), bottom_color=(0, 160, 255), shadow_offset=3)
             self.screen.blit(jump_badge, jump_badge.get_rect(center=(win_w // 2, HUD_TOP_H + 34)))
 
         # ======================================================================
@@ -869,18 +1033,39 @@ class LavaArenaRenderer:
         # ======================================================================
         if state.phase == Phase.RESULT:
             overlay = pygame.Surface((win_w, win_h), pygame.SRCALPHA)
-            overlay.fill((10, 12, 16, 225))
+            overlay.fill((14, 8, 28, 210))
             self.screen.blit(overlay, (0, 0))
 
-            over_title = self.font_title.render("ROUND OVER!", True, TEXT_GOLD)
-            final_score = self.font_large.render(f"FINAL SCORE: {state.score}", True, TEXT_WHITE)
-            stats = self.font_mid.render(f"DODGES: {state.dodges}   HITS: {state.hits}   BEST STREAK: {state.best_streak}", True, (0, 220, 255))
-            prompt = self.font_mid.render("PRESS [R] TO PLAY AGAIN   |   [ESC] TO EXIT", True, SAFE_GREEN)
+            card_w = min(win_w - 60, 760)
+            card_h = min(win_h - 80, 440)
+            card_x = (win_w - card_w) // 2
+            card_y = (win_h - card_h) // 2
 
-            self.screen.blit(over_title, over_title.get_rect(center=(win_w // 2, win_h // 2 - 80)))
-            self.screen.blit(final_score, final_score.get_rect(center=(win_w // 2, win_h // 2 - 20)))
-            self.screen.blit(stats, stats.get_rect(center=(win_w // 2, win_h // 2 + 30)))
-            self.screen.blit(prompt, prompt.get_rect(center=(win_w // 2, win_h // 2 + 90)))
+            card_surf = pygame.Surface((card_w, card_h), pygame.SRCALPHA)
+            card_surf.fill((20, 11, 42, 225))
+            self.screen.blit(card_surf, (card_x, card_y))
+
+            # Glowing neon gold & coral border
+            pygame.draw.rect(self.screen, (255, 209, 82), (card_x, card_y, card_w, card_h), width=3)
+            pygame.draw.rect(self.screen, (232, 56, 24), (card_x + 3, card_y + 3, card_w - 6, card_h - 6), width=1)
+
+            center_x = win_w // 2
+
+            over_title = render_pixel_text("ROUND OVER!", scale=5, top_color=(255, 224, 51), bottom_color=(232, 56, 24), shadow_offset=4)
+            self.screen.blit(over_title, over_title.get_rect(center=(center_x, card_y + 60)))
+
+            final_score = render_pixel_text(f"FINAL SCORE: {state.score:04d}", scale=4, top_color=(255, 255, 255), bottom_color=(200, 220, 255), shadow_offset=3)
+            self.screen.blit(final_score, final_score.get_rect(center=(center_x, card_y + 140)))
+
+            stats_str = f"DODGES: {state.dodges}   HITS: {state.hits}   BEST STREAK: {state.best_streak}"
+            stats_surf = render_pixel_text(stats_str, scale=2, top_color=(100, 240, 255), bottom_color=(20, 160, 255), shadow_offset=2)
+            self.screen.blit(stats_surf, stats_surf.get_rect(center=(center_x, card_y + 210)))
+
+            claim_surf = render_pixel_text("VISIT DESK TO CLAIM YOUR PHOTOCARD!", scale=2, top_color=(255, 224, 51), bottom_color=(255, 140, 20), shadow_offset=2)
+            self.screen.blit(claim_surf, claim_surf.get_rect(center=(center_x, card_y + 280)))
+
+            prompt_surf = render_pixel_text("[R] PLAY AGAIN   |   [ESC] EXIT", scale=2, top_color=(80, 255, 160), bottom_color=(0, 200, 100), shadow_offset=2)
+            self.screen.blit(prompt_surf, prompt_surf.get_rect(center=(center_x, card_y + 360)))
 
         pygame.display.flip()
 

@@ -23,6 +23,7 @@ SUBTILE_M = DEFAULT_ARENA_M / GRID_SIZE  # 0.18 m (18 cm) per cell
 BASE_WARN_TIME_S = 2.5   # Warning countdown duration in seconds
 ERUPT_HOLD_TIME_S = 1.0  # How long lava stays fully erupted before cooling
 COOLDOWN_TIME_S = 0.5    # Pause between hazard waves
+DEFAULT_ROUND_DURATION_S = 60.0  # Default round duration in seconds
 
 
 class WavePattern(str, Enum):
@@ -166,12 +167,12 @@ def generate_wave(pattern: WavePattern, player_x_m: float, player_y_m: float,
 class LavaEngine:
     """Manages continuous heatmap updates, hazard wave progression, and hit detection.
     Features 3-Stage Tournament Rounds:
-    - Round 1 (0-20s): Slow and steady, safe circular islands, 3.0s warning.
-    - Round 2 (20-40s): Chaotic geometric shapes (rivers, clusters), 2.0s warning, 1.5x multiplier.
-    - Round 3 (40-60s): Final Round rapid fire (1.6s -> 1.1s warning), mixed shapes, 2.0x multiplier.
+    - Round 1 Warmup (60s -> 40s): Steady Warmup (island / donut), 3.0s warning, 1.0x multiplier.
+    - Round 2 Chaos Shapes (40s -> 20s): Chaotic geometric shapes (rivers, clusters), 2.0s warning, 1.5x multiplier.
+    - Final Round Sudden Surge (20s -> 0s): Final Round rapid fire (1.6s -> 1.1s warning), mixed shapes, 2.0x multiplier.
     """
 
-    def __init__(self, duration_s: float = 60.0):
+    def __init__(self, duration_s: float = DEFAULT_ROUND_DURATION_S):
         self.duration_s = duration_s
         self.state = GameState(phase=Phase.PLAYING, time_left_s=duration_s, speed=1.0)
         self.wave: LavaWave | None = None
@@ -233,14 +234,20 @@ class LavaEngine:
 
         # ----------------------------------------------------------------------
         # 3-Stage Round Progression & Difficulty Escalation
+        # Splits evenly across the round duration:
+        # Round 1 Warmup: 60s -> 40s (elapsed < 20s)
+        # Round 2 Chaos Shapes: 40s -> 20s (elapsed < 40s)
+        # Final Round Sudden Surge: 20s -> 0s (elapsed >= 40s)
         # ----------------------------------------------------------------------
         elapsed = max(0.0, self.duration_s - self.state.time_left_s)
-        if elapsed < 20.0:
+        stage1_end = self.duration_s * (1.0 / 3.0)
+        stage2_end = self.duration_s * (2.0 / 3.0)
+        if elapsed < stage1_end:
             target_round = 1
             round_mult = 1.0
             allowed_patterns = [WavePattern.ISLAND, WavePattern.DONUT]
             base_warn = 3.0  # Slow and steady 3.0s warning
-        elif elapsed < 40.0:
+        elif elapsed < stage2_end:
             target_round = 2
             round_mult = 1.5
             allowed_patterns = [WavePattern.RIVER, WavePattern.CLUSTER]  # Random shapes, no circles
@@ -250,7 +257,8 @@ class LavaEngine:
             round_mult = 2.0
             allowed_patterns = list(WavePattern)  # Fast mix of all shapes
             # Rapid fire: warning decreases from 1.6s down to 1.1s
-            r3_prog = min(1.0, max(0.0, (elapsed - 40.0) / 20.0))
+            stage3_dur = max(0.001, self.duration_s - stage2_end)
+            r3_prog = min(1.0, max(0.0, (elapsed - stage2_end) / stage3_dur))
             base_warn = max(1.1, 1.6 - r3_prog * 0.5)
 
         # Trigger Street Fighter style round transition
