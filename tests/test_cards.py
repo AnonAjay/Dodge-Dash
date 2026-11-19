@@ -130,26 +130,10 @@ def test_card_generation_with_photo_and_scores(tmp_path, monkeypatch):
     import cards.generator as gen_mod
     gen_src = Path(gen_mod.__file__).read_text(encoding="utf-8")
     assert "TITANS' ARCADE" in gen_src
+    assert "TEQFEST 2K26" in gen_src
     assert "FLOOR IS LAVA" in gen_src
+    assert "POSE BLAZER" in gen_src
     assert "#TA-2026-" in gen_src
-
-    # Decode embedded direct-download QR from card (bottom-right region: x: 840-1030, y: 1120-1300)
-    qr_crop = card_img.crop((840, 1120, 1030, 1300))
-    det = cv2.QRCodeDetectorAruco()
-    decoded_url, _, _ = det.detectAndDecode(np.array(qr_crop))
-    assert decoded_url == "http://testserver/api/cards/P001/download"
-
-    # Test with PUBLIC_CARD_BASE_URL set
-    monkeypatch.setenv("PUBLIC_CARD_BASE_URL", "https://cdn.fest.org/cards")
-    card_path_pub = generate_card(
-        "P001",
-        data_dir=data_dir,
-        output_dir=cards_dir,
-    )
-    card_img_pub = Image.open(card_path_pub)
-    qr_crop_pub = card_img_pub.crop((840, 1120, 1030, 1300))
-    decoded_pub, _, _ = det.detectAndDecode(np.array(qr_crop_pub))
-    assert decoded_pub == "https://cdn.fest.org/cards/P001.png"
 
 
 def test_card_generation_without_photo_and_unplayed(tmp_path, monkeypatch):

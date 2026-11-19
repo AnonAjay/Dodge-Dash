@@ -11,15 +11,16 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-from cards.qr import generate_qr_image, resolve_card_qr_url
-from cards.uploader import get_cached_card_url
-
 
 def _get_font(size: int, bold: bool = False, mono: bool = False) -> ImageFont.ImageFont:
     """Safely load a TrueType font with fallbacks for Windows, Linux, and headless environments."""
+    static_dir = Path(__file__).resolve().parent.parent / "server" / "static"
+    silkscreen = str(static_dir / "silkscreen.ttf")
+
     font_candidates: list[str] = []
     if mono:
         font_candidates = [
+            silkscreen,
             "consola.ttf",
             "consolab.ttf" if bold else "consola.ttf",
             "Courier New.ttf",
@@ -224,7 +225,7 @@ def generate_card(
 
     # 3. Header Section (y = 56 to 160)
     font_sub_top = _get_font(18, bold=True, mono=True)
-    top_badge = "* OFFICIAL FESTIVAL SOUVENIR CARD // TECH-FEST 2026 *"
+    top_badge = "★ TEQFEST 2K26 // TITANS' ARCADE ★"
     draw.text((width // 2, 72), top_badge, fill="#ffd152", font=font_sub_top, anchor="mt")
 
     font_title = _get_font(52, bold=True)
@@ -305,39 +306,30 @@ def generate_card(
     draw.text((width // 2 + 2, 694 + 2), name_str, fill="#180a2b", font=font_name, anchor="mt")
     draw.text((width // 2, 694), name_str, fill="#ffffff", font=font_name, anchor="mt")
 
-    # URN and Height pill badges
+    # URN pill badge (Height removed per spec)
     roll_no = player.get("roll_no")
-    height_cm = player.get("height_cm")
-    badge_items: list[str] = []
     if roll_no:
-        badge_items.append(f"URN: {roll_no}")
-    if height_cm:
-        badge_items.append(f"HEIGHT: {int(height_cm)} CM")
-
-    if badge_items:
         font_pill = _get_font(18, bold=True, mono=True)
-        pill_text = "   |   ".join(badge_items)
-        draw.text((width // 2, 750), pill_text, fill="#ffd152", font=font_pill, anchor="mt")
+        draw.text((width // 2, 750), f"URN: {roll_no}", fill="#ffd152", font=font_pill, anchor="mt")
 
-    # 6. Tournament Performance Section (y = 788 to 1100)
+    # 6. Tournament Performance Section (2 Games: Floor is Lava & Pose Blazer)
     font_sec = _get_font(18, bold=True, mono=True)
     draw.text((width // 2, 788), "-- ARCADE TOURNAMENT STATS --", fill="#ea7d8b", font=font_sec, anchor="mt")
 
     card_y = 818
     card_h = 280
-    card_w = 296
-    card_margin_x = 64
-    card_gap = 26
+    card_w = 444
+    card_margin_x = 76
+    card_gap = 40
 
     games_info = [
         ("dodge", "FLOOR IS LAVA", "Station A"),
-        ("wall", "WALL SHAPE", "Station A"),
-        ("dance", "DANCE BATTLE", "Station B"),
+        ("blazer", "POSE BLAZER", "Station B"),
     ]
 
-    font_gh = _get_font(20, bold=True)
+    font_gh = _get_font(22, bold=True)
     font_gs = _get_font(13, mono=True)
-    font_score = _get_font(44, bold=True)
+    font_score = _get_font(48, bold=True)
     font_pts = _get_font(13, bold=True, mono=True)
     font_stat = _get_font(16, bold=True, mono=True)
 
@@ -348,17 +340,20 @@ def generate_card(
         cy2 = cy1 + card_h
 
         rec = best_scores.get(g_key)
+        if not rec and g_key == "blazer":
+            rec = best_scores.get("wall") or best_scores.get("pose_blazer")
         has_score = rec is not None
 
         # Panel Background
-        draw.rounded_rectangle([cx1, cy1, cx2, cy2], radius=10, fill="#201138", outline="#5a3c8c", width=2)
+        draw.rounded_rectangle([cx1, cy1, cx2, cy2], radius=12, fill="#201138", outline="#5a3c8c", width=2)
+        draw.rounded_rectangle([cx1 + 2, cy1 + 2, cx2 - 2, cy2 - 2], radius=10, outline="#35235d", width=1)
 
         # Header tab banner
         header_fill = "#35235d" if not has_score else "#48327a"
-        draw.rounded_rectangle([cx1, cy1, cx2, cy1 + 44], radius=10, fill=header_fill)
-        draw.rectangle([cx1, cy1 + 22, cx2, cy1 + 44], fill=header_fill)
+        draw.rounded_rectangle([cx1, cy1, cx2, cy1 + 46], radius=12, fill=header_fill)
+        draw.rectangle([cx1, cy1 + 22, cx2, cy1 + 46], fill=header_fill)
         draw.text(((cx1 + cx2) // 2, cy1 + 10), g_title, fill="#ffd152", font=font_gh, anchor="mt")
-        draw.text(((cx1 + cx2) // 2, cy1 + 34), g_station, fill="#d8b4fe", font=font_gs, anchor="mt")
+        draw.text(((cx1 + cx2) // 2, cy1 + 34), g_station.upper(), fill="#d8b4fe", font=font_gs, anchor="mt")
 
         # Divider under header
         draw.line([(cx1, cy1 + 52), (cx2, cy1 + 52)], fill="#5a3c8c", width=1)
@@ -375,54 +370,37 @@ def generate_card(
             # Score Number
             score_color = "#58c038" if score_val > 0 else "#ffffff"
             draw.text(((cx1 + cx2) // 2, cy1 + 72), f"{score_val:,}", fill=score_color, font=font_score, anchor="mt")
-            draw.text(((cx1 + cx2) // 2, cy1 + 124), "POINTS", fill="#d8b4fe", font=font_pts, anchor="mt")
+            draw.text(((cx1 + cx2) // 2, cy1 + 126), "POINTS", fill="#d8b4fe", font=font_pts, anchor="mt")
 
             # Metrics
-            draw.line([(cx1 + 20, cy1 + 148), (cx2 - 20, cy1 + 148)], fill="#48327a", width=1)
+            draw.line([(cx1 + 28, cy1 + 148), (cx2 - 28, cy1 + 148)], fill="#48327a", width=1)
             draw.text(((cx1 + cx2) // 2, cy1 + 168), f"ACCURACY: {acc_str}", fill="#00f0ff", font=font_stat, anchor="mt")
             draw.text(((cx1 + cx2) // 2, cy1 + 202), f"MAX STREAK: {streak_val}", fill="#ea7d8b", font=font_stat, anchor="mt")
             draw.text(((cx1 + cx2) // 2, cy1 + 242), "RANKED RECORD", fill="#ffd152", font=font_gs, anchor="mt")
         else:
             draw.text(((cx1 + cx2) // 2, cy1 + 84), "--", fill="#6b5b95", font=font_score, anchor="mt")
             draw.text(((cx1 + cx2) // 2, cy1 + 134), "NOT PLAYED YET", fill="#8570ab", font=font_pts, anchor="mt")
-            draw.line([(cx1 + 20, cy1 + 158), (cx2 - 20, cy1 + 158)], fill="#48327a", width=1)
+            draw.line([(cx1 + 28, cy1 + 158), (cx2 - 28, cy1 + 158)], fill="#48327a", width=1)
             draw.text(((cx1 + cx2) // 2, cy1 + 180), "ACCURACY: --", fill="#6a548e", font=font_stat, anchor="mt")
             draw.text(((cx1 + cx2) // 2, cy1 + 214), "MAX STREAK: --", fill="#6a548e", font=font_stat, anchor="mt")
             draw.text(((cx1 + cx2) // 2, cy1 + 248), "STANDBY", fill="#6a548e", font=font_gs, anchor="mt")
 
-    # 7. Bottom Verification & Offline QR Bar (y = 1120 to 1290)
-    bot_y1 = 1126
+    # 7. Bottom Verification & Event Archive Bar (y = 1130 to 1290, QR removed per spec)
+    bot_y1 = 1130
     bot_y2 = 1290
-    draw.rounded_rectangle([64, bot_y1, width - 64, bot_y2], radius=12, fill="#1c0e30", outline="#48327a", width=2)
+    draw.rounded_rectangle([76, bot_y1, width - 76, bot_y2], radius=14, fill="#1c0e30", outline="#ffd152", width=2)
+    draw.rounded_rectangle([80, bot_y1 + 4, width - 80, bot_y2 - 4], radius=10, outline="#48327a", width=1)
 
-    # QR Code on right side of bottom bar
-    qr_data = resolve_card_qr_url(player_id=player_id, base_url=base_url, data_dir=data_path)
+    font_b1 = _get_font(22, bold=True)
+    font_b2 = _get_font(15, mono=True, bold=True)
+    font_b3 = _get_font(14, mono=True)
+    font_b4 = _get_font(13, mono=True)
 
-    qr_size = 124
-    qr_x = width - 64 - qr_size - 18
-    qr_y = bot_y1 + 18
-
-    try:
-        qr_img = generate_qr_image(qr_data, box_size=3, border=2)
-        qr_scaled = qr_img.resize((qr_size, qr_size), Image.Resampling.NEAREST)
-        canvas.paste(qr_scaled, (qr_x, qr_y))
-        draw.rectangle([qr_x, qr_y, qr_x + qr_size, qr_y + qr_size], outline="#ffd152", width=2)
-    except Exception:
-        draw.rectangle([qr_x, qr_y, qr_x + qr_size, qr_y + qr_size], fill="#2b184a", outline="#ea7d8b", width=2)
-
-    font_qr_caption = _get_font(11, bold=True, mono=True)
-    draw.text((qr_x + qr_size // 2, qr_y + qr_size + 4), "SCAN FOR CARD", fill="#ffd152", font=font_qr_caption, anchor="mt")
-
-    # Left side info
-    font_b1 = _get_font(20, bold=True)
-    font_b2 = _get_font(14, mono=True)
-    font_b3 = _get_font(13, mono=True)
-
-    info_x = 94
-    draw.text((info_x, bot_y1 + 26), "TITANS' ARCADE // TECH-FEST 2026", fill="#ffffff", font=font_b1)
-    draw.text((info_x, bot_y1 + 58), "100% OFFLINE LOCAL ARENA ARCHIVE", fill="#58c038", font=font_b2)
-    draw.text((info_x, bot_y1 + 84), f"VERIFIED PASS TOKEN: #TA-2026-{player_id}", fill="#00f0ff", font=font_b3)
-    draw.text((info_x, bot_y1 + 108), "HOST: LAPTOP 3 SCORE SERVER | ZERO CLOUD TELEMETRY", fill="#d8b4fe", font=font_b3)
+    mid_x = width // 2
+    draw.text((mid_x, bot_y1 + 22), "TITANS' ARCADE // TEQFEST 2K26", fill="#ffffff", font=font_b1, anchor="mt")
+    draw.text((mid_x, bot_y1 + 58), "100% OFFLINE LOCAL ARENA ARCHIVE", fill="#58c038", font=font_b2, anchor="mt")
+    draw.text((mid_x, bot_y1 + 88), f"VERIFIED PLAYER PASS: #TA-2026-{player_id}", fill="#00f0ff", font=font_b3, anchor="mt")
+    draw.text((mid_x, bot_y1 + 116), "OFFICIAL TOURNAMENT RECORD // LAPTOP 3 SCORE SERVER", fill="#d8b4fe", font=font_b4, anchor="mt")
 
     # 8. CRT Scanline Overlay
     scanline_overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))

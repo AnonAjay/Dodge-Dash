@@ -2026,15 +2026,9 @@ def operator_desk(request: Request) -> str:
         <input type="text" id="player-name" class="pixel-input" placeholder="e.g. Ravi" autocomplete="off" autofocus />
       </div>
 
-      <div class="form-row">
-        <div class="form-group">
-          <label for="player-roll">URN</label>
-          <input type="text" id="player-roll" class="pixel-input" placeholder="e.g. 24303192" autocomplete="off" />
-        </div>
-        <div class="form-group">
-          <label for="player-height">HEIGHT (CM)</label>
-          <input type="number" id="player-height" class="pixel-input" placeholder="e.g. 153" min="100" max="230" />
-        </div>
+      <div class="form-group">
+        <label for="player-roll">URN</label>
+        <input type="text" id="player-roll" class="pixel-input" placeholder="e.g. 24303192" autocomplete="off" />
       </div>
 
       <div class="form-group">
@@ -2124,7 +2118,6 @@ def operator_desk(request: Request) -> str:
               <th>PLAYER ID</th>
               <th>NAME</th>
               <th>URN</th>
-              <th>HEIGHT</th>
               <th style="width: 100px; text-align: center;">PHOTOCARD</th>
             </tr>
           </thead>
@@ -2308,7 +2301,6 @@ def operator_desk(request: Request) -> str:
   async function handleRegister(withPhoto) {
     const nameInput = document.getElementById('player-name');
     const rollInput = document.getElementById('player-roll');
-    const heightInput = document.getElementById('player-height');
 
     const name = nameInput.value.trim();
     if (!name) {
@@ -2323,7 +2315,6 @@ def operator_desk(request: Request) -> str:
     }
 
     const roll_no = rollInput.value.trim() || null;
-    const height_cm = heightInput.value ? parseFloat(heightInput.value) : null;
     const photo_base64 = withPhoto ? pendingPhotoBase64 : null;
 
     const urlPin = new URLSearchParams(window.location.search).get('pin');
@@ -2336,7 +2327,7 @@ def operator_desk(request: Request) -> str:
       const res = await fetch('/api/players', {
         method: 'POST',
         headers: reqHeaders,
-        body: JSON.stringify({ name, roll_no, height_cm, photo_base64 })
+        body: JSON.stringify({ name, roll_no, height_cm: null, photo_base64 })
       });
 
       if (res.status === 409) {
@@ -2384,7 +2375,6 @@ def operator_desk(request: Request) -> str:
 
       nameInput.value = '';
       rollInput.value = '';
-      heightInput.value = '';
       clearPhoto();
       nameInput.focus();
 
@@ -2423,10 +2413,8 @@ def operator_desk(request: Request) -> str:
 
     const nameInput = document.getElementById('player-name');
     const rollInput = document.getElementById('player-roll');
-    const heightInput = document.getElementById('player-height');
     if (nameInput) nameInput.value = p.name || '';
     if (rollInput) rollInput.value = p.roll_no || '';
-    if (heightInput) heightInput.value = p.height_cm != null ? p.height_cm : '';
 
     const successCard = document.getElementById('reg-success');
     const warnCard = document.getElementById('reg-warning');
@@ -2474,7 +2462,6 @@ def operator_desk(request: Request) -> str:
       const rollHtml = p.roll_no
         ? `<span class="roll-badge">${p.roll_no}</span>`
         : `<span style="color: #c084fc;">-</span>`;
-      const heightHtml = p.height_cm ? `<span class="height-cell">${p.height_cm} cm</span>` : `<span style="color: #c084fc;">-</span>`;
       let rowClass = '';
       if (highlightedPid && p.player_id === highlightedPid) {
         rowClass = 'row-highlight';
@@ -2499,7 +2486,6 @@ def operator_desk(request: Request) -> str:
         <td><span class="pid-badge">${p.player_id}</span></td>
         <td class="name-cell"><span class="name-text">${p.name}</span></td>
         <td>${rollHtml}</td>
-        <td>${heightHtml}</td>
         <td style="text-align: center;">
           <button class="btn-action-qr" type="button" title="Open Photocard QR &amp; Download" onclick="event.stopPropagation(); openQrModal('${p.player_id}', '${p.name.replace(/'/g, "\\'")}')">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display: block;">
