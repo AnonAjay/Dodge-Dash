@@ -152,6 +152,8 @@ def test_big_screen_display_offline(client):
     html = res.text
     assert "TITANS' ARCADE" in html or "Titans' Arcade" in html
     assert "FLOOR IS LAVA" in html
+    assert "POSE BLAZER" in html
+    assert "DANCE" not in html
     assert "REGISTRATION PANEL" in html
     assert "LEADERBOARD" in html
     assert "LIVE RESULTS" in html
@@ -169,6 +171,7 @@ def test_big_screen_display_offline(client):
     assert "showcase-panel" not in html
     # Spectator display should not have player registration form input
     assert 'id="player-name"' not in html
+    assert "name-text" in html
     # Ensure 100% offline (no external CDN links)
     assert "https://" not in html
     assert "http://" not in html
@@ -191,7 +194,16 @@ def test_operator_desk_offline(client):
     assert "font-size: 13px" in html
     assert "font-size: 15px" in html
     assert "padding: 4px 10px" in html
+    assert "thumb-del-btn" in html
+    assert "photo-thumb-container" in html
     assert "navigator.mediaDevices.getUserMedia" in html
+    # Check camera modal & row selection features
+    assert "camera-modal" in html
+    assert "btn-open-camera" in html
+    assert "openCameraModal" in html
+    assert "captureFromModal" in html
+    assert "selectPlayerRow" in html
+    assert "name-text" in html
     # Check interactive drag-to-resize divider elements & features
     assert "drag-divider" in html
     assert "col-resize" in html
@@ -244,3 +256,26 @@ def test_blank_urn_allowance(client):
 
     players = client.get("/api/players").json()
     assert len(players) == 3
+
+
+def test_delete_player_endpoint(client):
+    # Register players with and without photo
+    p1 = client.post("/api/players", json={"name": "Alice"}).json()
+    p2 = client.post("/api/players", json={"name": "Bob"}).json()
+    assert len(client.get("/api/players").json()) == 2
+
+    # Delete Alice
+    del_res = client.delete(f"/api/players/{p1['player_id']}")
+    assert del_res.status_code == 200
+    assert del_res.json()["ok"] is True
+    assert del_res.json()["deleted_player_id"] == p1["player_id"]
+
+    # Roster should only have Bob
+    remaining = client.get("/api/players").json()
+    assert len(remaining) == 1
+    assert remaining[0]["player_id"] == p2["player_id"]
+
+    # Deleting non-existent player should return 404
+    del_again = client.delete(f"/api/players/{p1['player_id']}")
+    assert del_again.status_code == 404
+

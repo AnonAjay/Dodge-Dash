@@ -238,6 +238,37 @@ def get_player(player_id: str) -> dict:
     raise HTTPException(status_code=404, detail="Player not found")
 
 
+@app.delete("/api/players/{player_id}")
+def delete_player(player_id: str, request: Request) -> dict[str, Any]:
+    _check_operator_auth(request)
+    with _lock:
+        players = _read_players_locked()
+        orig_len = len(players)
+        players = [p for p in players if p.get("player_id") != player_id]
+        if len(players) == orig_len:
+            raise HTTPException(status_code=404, detail=f"Player {player_id} not found")
+        _write_players_locked(players)
+
+        # Delete photo file if present
+        photo_file = PHOTOS_DIR / f"{player_id}.jpg"
+        if photo_file.exists():
+            try:
+                photo_file.unlink()
+            except Exception:
+                pass
+
+        # Delete generated photocard if present
+        card_file = DATA / "cards" / f"{player_id}.png"
+        if card_file.exists():
+            try:
+                card_file.unlink()
+            except Exception:
+                pass
+
+    invalidate_card_url(player_id, data_dir=DATA)
+    return {"ok": True, "deleted_player_id": player_id}
+
+
 @app.get("/api/photos/{filename}")
 def get_photo(filename: str) -> FileResponse:
     safe_name = Path(filename).name
@@ -268,16 +299,17 @@ def leaderboard() -> dict[str, list[dict]]:
 
     player_names = {p["player_id"]: p.get("name", p["player_id"]) for p in players}
 
-    by_game: dict[str, dict[str, dict]] = {"dodge": {}, "wall": {}, "dance": {}}
+    by_game: dict[str, dict[str, dict]] = {"dodge": {}, "blazer": {}}
 
     for score_record in scores:
-        game = score_record.get("game", "")
+        raw_game = score_record.get("game", "")
         pid = score_record.get("player_id", "")
-        if not game or not pid:
+        if not raw_game or not pid:
             continue
 
-        if game not in by_game:
-            by_game[game] = {}
+        canonical_game = "blazer" if raw_game in ("wall", "pose_blazer", "blazer") else raw_game
+        if canonical_game not in by_game:
+            by_game[canonical_game] = {}
 
         candidate_key = (
             score_record.get("score", 0),
@@ -285,9 +317,9 @@ def leaderboard() -> dict[str, list[dict]]:
             score_record.get("best_streak", 0),
         )
 
-        existing = by_game[game].get(pid)
+        existing = by_game[canonical_game].get(pid)
         if existing is None:
-            by_game[game][pid] = score_record
+            by_game[canonical_game][pid] = score_record
         else:
             existing_key = (
                 existing.get("score", 0),
@@ -295,7 +327,7 @@ def leaderboard() -> dict[str, list[dict]]:
                 existing.get("best_streak", 0),
             )
             if candidate_key > existing_key:
-                by_game[game][pid] = score_record
+                by_game[canonical_game][pid] = score_record
 
     result: dict[str, list[dict]] = {}
     for game, player_bests in by_game.items():
@@ -314,6 +346,10 @@ def leaderboard() -> dict[str, list[dict]]:
             reverse=True,
         )
         result[game] = rows[:10]
+
+    # Provide backwards compatibility alias for wall if blazer exists
+    if "blazer" in result and "wall" not in result:
+        result["wall"] = result["blazer"]
 
     return result
 
@@ -623,6 +659,21 @@ def big_screen_display() -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Titans' Arcade - Leaderboard</title>
 <style>
+  @font-face {
+    font-family: 'PixelGame';
+    src: url('/static/silkscreen.ttf') format('truetype');
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: 'ArcadeClassic';
+    src: url('/static/press-start-2p.ttf') format('truetype');
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+  }
+
   :root {
     --twilight-dark: #35235d;
     --twilight-purple: #48327a;
@@ -633,7 +684,8 @@ def big_screen_display() -> str:
     --retro-green: #58c038;
     --neon-cyan: #00f0ff;
     --font-pixel: "Consolas", "Courier New", monospace;
-    --font-retro: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    --font-game: 'PixelGame', 'Press Start 2P', 'Consolas', monospace, sans-serif;
+    --font-sans: "Inter", "Plus Jakarta Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -644,15 +696,17 @@ def big_screen_display() -> str:
     overflow: hidden;
     user-select: none;
     color: #f8fafc;
-    font-family: var(--font-retro);
-    background-color: #2c1b4e;
+    font-family: var(--font-sans);
+    line-height: 1.5;
+    background-color: #1a0f30;
     background-image:
+      url('/static/bg-sunset.webp'),
       url('/static/bg-sunset.png'),
       linear-gradient(180deg, #2b1e4a 0%, #5c3787 42%, #d97398 72%, #fca289 84%, #4ea832 84%, #5c3a21 90%);
-    background-size: cover, cover;
-    background-position: center bottom, center bottom;
-    background-repeat: no-repeat, no-repeat;
-    background-attachment: fixed, fixed;
+    background-size: cover, cover, cover;
+    background-position: center bottom, center bottom, center bottom;
+    background-repeat: no-repeat, no-repeat, no-repeat;
+    background-attachment: fixed, fixed, fixed;
     image-rendering: pixelated;
   }
 
@@ -664,22 +718,24 @@ def big_screen_display() -> str:
     z-index: 50;
     background: linear-gradient(
       rgba(72, 50, 122, 0) 50%,
-      rgba(35, 18, 65, 0.24) 50%
+      rgba(35, 18, 65, 0.12) 50%
     );
     background-size: 100% 4px;
+    opacity: 0.10;
   }
 
   /* Header */
   header {
     width: 100%;
     height: 64px;
-    border-bottom: 1px solid rgba(216, 180, 254, 0.3);
+    border-bottom: 1.5px solid rgba(255, 110, 140, 0.4);
     padding: 0 28px;
     z-index: 10;
     flex-shrink: 0;
-    background-color: rgba(53, 35, 93, 0.84);
-    backdrop-filter: blur(8px);
-    box-shadow: 0 4px 20px rgba(35, 18, 65, 0.45);
+    background-color: rgba(24, 12, 48, 0.65);
+    backdrop-filter: blur(14px) saturate(135%);
+    -webkit-backdrop-filter: blur(14px) saturate(135%);
+    box-shadow: 0 4px 20px rgba(10, 4, 24, 0.5);
     display: flex;
     align-items: center;
   }
@@ -692,7 +748,7 @@ def big_screen_display() -> str:
     justify-content: space-between;
   }
   .brand-title {
-    font-family: var(--font-pixel);
+    font-family: var(--font-game);
     font-size: 22px;
     font-weight: 900;
     letter-spacing: 2px;
@@ -719,11 +775,11 @@ def big_screen_display() -> str:
   }
   @keyframes pulse { 0% { opacity: 0.55; } 50% { opacity: 1; } 100% { opacity: 0.55; } }
   .live-label {
-    font-family: var(--font-pixel);
-    font-size: 12px;
+    font-family: var(--font-game);
+    font-size: 0.85rem;
     font-weight: 700;
     color: #fbcfe8;
-    letter-spacing: 1.5px;
+    letter-spacing: 0.08em;
   }
   .v-sep {
     height: 18px;
@@ -732,26 +788,24 @@ def big_screen_display() -> str:
   }
   .nav-btn {
     text-decoration: none;
-    background: rgba(72, 50, 122, 0.92);
+    background: rgba(72, 50, 122, 0.7);
     color: #fef9c3;
-    font-family: var(--font-pixel);
-    font-size: 11px;
+    font-family: var(--font-game);
+    font-size: 0.82rem;
     font-weight: 700;
-    letter-spacing: 1.2px;
-    padding: 8px 14px;
+    letter-spacing: 0.05em;
+    padding: 10px 16px;
+    border-radius: 6px;
+    border: 1.5px solid rgba(255, 110, 140, 0.5);
     text-transform: uppercase;
-    box-shadow:
-      inset 0 0 0 2px rgba(45, 25, 75, 0.9),
-      0 0 0 2px var(--twilight-lilac);
-    transition: all 0.12s;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+    transition: all 0.15s;
   }
   .nav-btn:hover {
-    background: #5c3e9b;
+    background: rgba(234, 125, 139, 0.35);
     color: #fff;
-    box-shadow:
-      inset 0 0 0 2px rgba(45, 25, 75, 0.9),
-      0 0 0 2px var(--sunset-pink),
-      0 0 10px rgba(234, 125, 139, 0.45);
+    border-color: var(--sunset-pink);
+    box-shadow: 0 0 12px rgba(234, 125, 139, 0.5);
   }
 
   /* Main Container */
@@ -769,19 +823,18 @@ def big_screen_display() -> str:
   .pixel-panel {
     flex: 1;
     width: 100%;
-    border-radius: 6px;
-    padding: 22px 28px;
-    background-color: rgba(53, 35, 93, 0.86);
-    backdrop-filter: blur(10px);
+    border-radius: 8px;
+    padding: 24px 28px;
+    background: rgba(24, 12, 48, 0.52);
+    backdrop-filter: blur(14px) saturate(135%);
+    -webkit-backdrop-filter: blur(14px) saturate(135%);
+    border: 1.5px solid rgba(255, 110, 140, 0.55);
     display: flex;
     flex-direction: column;
     overflow: hidden;
     box-shadow:
-      0 0 0 2px var(--sunset-pink),
-      0 0 0 4px var(--twilight-purple),
-      0 0 0 6px #241442,
-      0 15px 35px rgba(25, 10, 48, 0.65),
-      0 0 30px rgba(234, 125, 139, 0.28);
+      0 15px 35px rgba(10, 4, 24, 0.6),
+      0 0 25px rgba(234, 125, 139, 0.25);
   }
 
   /* Panel Top Bar */
@@ -794,13 +847,13 @@ def big_screen_display() -> str:
     flex-shrink: 0;
   }
   .panel-title {
-    font-family: var(--font-pixel);
+    font-family: var(--font-game);
     font-size: 26px;
     font-weight: 900;
     color: #ffffff;
-    letter-spacing: 0.25em;
+    letter-spacing: 0.20em;
     text-align: center;
-    text-shadow: 0 0 12px rgba(234, 125, 139, 0.85), 2px 2px 0 #241442;
+    text-shadow: 0 0 14px rgba(234, 125, 139, 0.85), 2px 2px 0 #241442;
   }
   .game-modes {
     display: flex;
@@ -810,34 +863,31 @@ def big_screen_display() -> str:
   }
   .tab-btn {
     cursor: pointer;
-    border: none;
-    background: rgba(72, 50, 122, 0.85);
+    border: 1.5px solid rgba(155, 116, 184, 0.45);
+    border-radius: 6px;
+    background: rgba(16, 8, 34, 0.55);
     color: #e9d5ff;
-    font-family: var(--font-pixel);
-    font-size: 12px;
+    font-family: var(--font-game);
+    font-size: 0.82rem;
     font-weight: 700;
-    padding: 9px 14px;
-    letter-spacing: 1px;
+    padding: 10px 16px;
+    letter-spacing: 0.05em;
     text-transform: uppercase;
-    box-shadow:
-      inset 0 0 0 2px rgba(45, 25, 75, 0.9),
-      0 0 0 2px var(--twilight-lilac);
-    transition: all 0.12s;
+    transition: all 0.15s;
   }
   .tab-btn:hover {
     color: #fff;
-    box-shadow:
-      inset 0 0 0 2px rgba(45, 25, 75, 0.9),
-      0 0 0 2px var(--sunset-pink),
-      0 0 10px rgba(234, 125, 139, 0.45);
+    background: rgba(255, 255, 255, 0.08);
+    border-color: var(--sunset-pink);
+    box-shadow: 0 0 10px rgba(234, 125, 139, 0.45);
   }
   .tab-btn.active {
     background: var(--retro-green);
     color: #0f172a;
-    font-weight: 900;
+    font-weight: 800;
+    border-color: #a7f3d0;
     box-shadow:
-      inset 0 0 0 2px #fff,
-      0 0 0 2px var(--retro-green),
+      0 0 0 1px #fff,
       0 0 14px rgba(88, 192, 56, 0.7);
   }
 
@@ -854,124 +904,173 @@ def big_screen_display() -> str:
     border-spacing: 0 10px;
   }
   .lb-table th {
-    font-family: var(--font-pixel);
-    font-size: 13px;
-    font-weight: 800;
+    font-family: var(--font-game);
+    font-size: 0.85rem;
+    font-weight: 700;
     color: rgba(251, 207, 232, 0.95);
-    letter-spacing: 1.2px;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
-    padding: 12px 18px;
+    padding: 14px 16px;
     text-align: left;
-    background: rgba(61, 39, 107, 0.8);
-    border-bottom: 1px solid rgba(249, 168, 212, 0.35);
+    background: #180c30;
+    background: rgba(22, 11, 46, 0.98);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border-bottom: 1.5px solid rgba(255, 110, 140, 0.35);
+    position: sticky;
+    top: 0;
+    z-index: 10;
   }
   .lb-table td {
-    padding: 15px 18px;
-    font-size: 16px;
-    font-weight: 700;
-    background: rgba(72, 50, 122, 0.68);
-    border-top: 1px solid rgba(234, 125, 139, 0.22);
-    border-bottom: 1px solid rgba(234, 125, 139, 0.22);
-    transition: filter 0.12s;
+    padding: 14px 16px;
+    font-family: var(--font-sans);
+    font-size: 1.05rem;
+    font-weight: 600;
+    background: rgba(16, 8, 34, 0.45);
+    border-top: 1px solid rgba(255, 110, 140, 0.2);
+    border-bottom: 1px solid rgba(255, 110, 140, 0.2);
+    line-height: 1.5;
+    transition: background-color 0.15s, border-color 0.15s;
   }
   .lb-table tbody tr:hover td {
-    filter: brightness(1.12);
+    background: rgba(255, 255, 255, 0.06);
   }
   .lb-table tr td:first-child {
     border-left: 4px solid var(--twilight-lilac);
-    border-top-left-radius: 3px;
-    border-bottom-left-radius: 3px;
+    border-top-left-radius: 4px;
+    border-bottom-left-radius: 4px;
     text-align: center;
     width: 100px;
-    font-family: var(--font-pixel);
-    font-size: 15px;
+    font-family: var(--font-game);
+    font-size: 1.15rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
     color: #e9d5ff;
+    letter-spacing: 0.05em;
   }
   .lb-table tr td:last-child {
-    border-right: 1px solid rgba(234, 125, 139, 0.22);
-    border-top-right-radius: 3px;
-    border-bottom-right-radius: 3px;
+    border-right: 1px solid rgba(255, 110, 140, 0.2);
+    border-top-right-radius: 4px;
+    border-bottom-right-radius: 4px;
   }
 
   /* Gold / Silver / Bronze Podium Rows */
   .rank-1 td {
-    background: linear-gradient(90deg, rgba(255, 209, 82, 0.32) 0%, rgba(72, 50, 122, 0.78) 45%, rgba(53, 35, 93, 0.88) 100%);
+    background: linear-gradient(90deg, rgba(255, 209, 82, 0.26) 0%, rgba(24, 12, 48, 0.6) 45%, rgba(16, 8, 34, 0.5) 100%);
     border-top-color: rgba(255, 209, 82, 0.45);
     border-bottom-color: rgba(255, 209, 82, 0.45);
   }
   .rank-1 td:first-child {
     border-left: 4px solid var(--sunset-gold);
     color: var(--sunset-gold);
-    text-shadow: 0 0 8px rgba(255, 209, 82, 0.9);
+    text-shadow: 0 0 10px rgba(255, 209, 82, 0.9);
   }
-  .rank-1 .name-cell {
-    color: var(--sunset-gold);
-    text-shadow: 0 0 6px rgba(255, 209, 82, 0.6);
+  .rank-1 .name-cell .name-text {
+    color: #fef08a;
+    background: linear-gradient(180deg, #ffffff 15%, #fef08a 45%, #fcd34d 75%, #f59e0b 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(2px 2px 0 #451a03) drop-shadow(0 0 8px rgba(255, 209, 82, 0.7));
   }
   .rank-1 .stat-cell { color: var(--sunset-gold); }
 
   .rank-2 td {
-    background: linear-gradient(90deg, rgba(226, 232, 240, 0.25) 0%, rgba(72, 50, 122, 0.78) 45%, rgba(53, 35, 93, 0.88) 100%);
+    background: linear-gradient(90deg, rgba(226, 232, 240, 0.22) 0%, rgba(24, 12, 48, 0.6) 45%, rgba(16, 8, 34, 0.5) 100%);
     border-top-color: rgba(226, 232, 240, 0.35);
     border-bottom-color: rgba(226, 232, 240, 0.35);
   }
   .rank-2 td:first-child {
     border-left: 4px solid #e2e8f0;
     color: #ffffff;
-    text-shadow: 0 0 8px rgba(255, 255, 255, 0.8);
+    text-shadow: 0 0 10px rgba(255, 255, 255, 0.8);
   }
-  .rank-2 .name-cell { color: #ffffff; }
+  .rank-2 .name-cell .name-text {
+    color: #ffffff;
+    background: linear-gradient(180deg, #ffffff 20%, #e2e8f0 55%, #94a3b8 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(2px 2px 0 #0f172a) drop-shadow(0 0 8px rgba(255, 255, 255, 0.6));
+  }
   .rank-2 .stat-cell { color: #f3e8ff; }
 
   .rank-3 td {
-    background: linear-gradient(90deg, rgba(252, 162, 137, 0.28) 0%, rgba(72, 50, 122, 0.78) 45%, rgba(53, 35, 93, 0.88) 100%);
+    background: linear-gradient(90deg, rgba(252, 162, 137, 0.24) 0%, rgba(24, 12, 48, 0.6) 45%, rgba(16, 8, 34, 0.5) 100%);
     border-top-color: rgba(252, 162, 137, 0.4);
     border-bottom-color: rgba(252, 162, 137, 0.4);
   }
   .rank-3 td:first-child {
     border-left: 4px solid var(--sunset-peach);
     color: var(--sunset-peach);
-    text-shadow: 0 0 8px rgba(252, 162, 137, 0.8);
+    text-shadow: 0 0 10px rgba(252, 162, 137, 0.8);
   }
-  .rank-3 .name-cell { color: var(--sunset-peach); }
+  .rank-3 .name-cell .name-text {
+    color: var(--sunset-peach);
+    background: linear-gradient(180deg, #ffffff 15%, #fecdd3 45%, #fca289 75%, #f43f5e 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(2px 2px 0 #4c0519) drop-shadow(0 0 8px rgba(252, 162, 137, 0.65));
+  }
   .rank-3 .stat-cell { color: var(--sunset-peach); }
 
   .pid-tag {
     display: inline-block;
-    font-family: var(--font-pixel);
-    font-size: 12px;
-    background: var(--twilight-dark);
+    font-family: var(--font-game);
+    font-size: 1.00rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.05em;
+    background: rgba(16, 8, 34, 0.65);
     color: #fef08a;
-    padding: 4px 9px;
+    padding: 4px 10px;
+    border-radius: 4px;
     border: 1px solid rgba(255, 209, 82, 0.55);
   }
   .name-cell {
-    font-family: var(--font-pixel);
-    font-size: 15px;
-    color: #f3e8ff;
-    letter-spacing: 0.5px;
+    font-family: var(--font-game);
+    font-size: 1.15rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: #f5d0fe;
+  }
+  .name-cell .name-text {
+    display: inline-block;
+    color: #ffffff;
+    background: linear-gradient(180deg, #ffffff 15%, #f5d0fe 45%, #d8b4fe 75%, #a855f7 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(2px 2px 0 #1e0538) drop-shadow(0 0 6px rgba(192, 132, 252, 0.45));
+    transition: filter 0.15s ease;
+  }
+  .lb-table tbody tr:hover .name-cell .name-text {
+    filter: drop-shadow(2px 2px 0 #1e0538) drop-shadow(0 0 10px rgba(232, 121, 249, 0.75));
   }
   .score-val {
-    font-family: var(--font-pixel);
-    font-size: 18px;
-    font-weight: 900;
+    font-family: var(--font-game);
+    font-size: 1.15rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.05em;
     color: var(--neon-cyan);
-    letter-spacing: 1px;
-    text-shadow: 0 0 8px rgba(0, 240, 255, 0.75);
+    text-shadow: 0 0 10px rgba(0, 240, 255, 0.85);
   }
   .stat-cell {
-    font-family: var(--font-pixel);
-    font-size: 14px;
+    font-family: var(--font-game);
+    font-size: 1.05rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.05em;
     color: #e9d5ff;
     text-align: center;
   }
   .empty-board {
     text-align: center;
     padding: 110px 20px;
-    font-family: var(--font-pixel);
-    font-size: 14px;
+    font-family: var(--font-game);
+    font-size: 1.0rem;
+    font-weight: 600;
     line-height: 1.9;
     color: #fbcfe8;
+    letter-spacing: 0.05em;
   }
 </style>
 </head>
@@ -999,8 +1098,7 @@ def big_screen_display() -> str:
       <h2 class="panel-title">LEADERBOARD</h2>
       <div class="game-modes">
         <button class="tab-btn active" data-game="dodge" onclick="switchTab('dodge')">FLOOR IS LAVA</button>
-        <button class="tab-btn" data-game="wall" onclick="switchTab('wall')">WALL SHAPE</button>
-        <button class="tab-btn" data-game="dance" onclick="switchTab('dance')">DANCE</button>
+        <button class="tab-btn" data-game="blazer" onclick="switchTab('blazer')">POSE BLAZER</button>
       </div>
     </div>
 
@@ -1055,12 +1153,15 @@ def big_screen_display() -> str:
     const tbody = document.getElementById('lb-body');
     const table = document.getElementById('lb-table');
     const empty = document.getElementById('lb-empty');
-    const rows = lbData[activeGame] || [];
+    const rows = lbData[activeGame] || (activeGame === 'blazer' ? (lbData['wall'] || []) : []) || [];
 
     if (rows.length === 0) {
       tbody.innerHTML = '';
       table.style.display = 'none';
       empty.style.display = 'block';
+      empty.innerHTML = activeGame === 'blazer'
+        ? 'NO SCORES RECORDED YET FOR POSE BLAZER.<br>STRIKE THE CUTOUT POSES AND CLAIM THE TOP RANK!'
+        : 'NO SCORES RECORDED YET FOR THIS EVENT.<br>STEP ON THE ARENA TILES AND CLAIM THE TOP RANK!';
       return;
     }
 
@@ -1081,7 +1182,7 @@ def big_screen_display() -> str:
       return `<tr class="${rowClass}">
         <td>${rankHtml}</td>
         <td style="text-align: center;"><span class="pid-tag">${r.player_id}</span></td>
-        <td class="name-cell">${r.name || r.player_id}</td>
+        <td class="name-cell"><span class="name-text">${r.name || r.player_id}</span></td>
         <td class="score-val">${r.score}</td>
         <td class="stat-cell">${acc}</td>
         <td class="stat-cell">${streak}</td>
@@ -1107,6 +1208,21 @@ def operator_desk(request: Request) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Titans' Arcade - Player Registration</title>
 <style>
+  @font-face {
+    font-family: 'PixelGame';
+    src: url('/static/silkscreen.ttf') format('truetype');
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: 'ArcadeClassic';
+    src: url('/static/press-start-2p.ttf') format('truetype');
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+  }
+
   :root {
     --twilight-dark: #35235d;
     --twilight-purple: #48327a;
@@ -1116,9 +1232,10 @@ def operator_desk(request: Request) -> str:
     --sunset-gold: #ffd152;
     --retro-green: #58c038;
     --neon-cyan: #00f0ff;
-    --input-bg: #241645;
+    --input-bg: rgba(16, 8, 34, 0.55);
     --font-pixel: "Consolas", "Courier New", monospace;
-    --font-retro: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    --font-game: 'PixelGame', 'Press Start 2P', 'Consolas', monospace, sans-serif;
+    --font-sans: "Inter", "Plus Jakarta Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -1128,15 +1245,17 @@ def operator_desk(request: Request) -> str:
     overflow: hidden;
     user-select: none;
     color: #f8fafc;
-    font-family: var(--font-retro);
-    background-color: #2c1b4e;
+    font-family: var(--font-sans);
+    line-height: 1.5;
+    background-color: #1a0f30;
     background-image:
+      url('/static/bg-sunset.webp'),
       url('/static/bg-sunset.png'),
       linear-gradient(180deg, #2b1e4a 0%, #5c3787 42%, #d97398 72%, #fca289 84%, #4ea832 84%, #5c3a21 90%);
-    background-size: cover, cover;
-    background-position: center bottom, center bottom;
-    background-repeat: no-repeat, no-repeat;
-    background-attachment: fixed, fixed;
+    background-size: cover, cover, cover;
+    background-position: center bottom, center bottom, center bottom;
+    background-repeat: no-repeat, no-repeat, no-repeat;
+    background-attachment: fixed, fixed, fixed;
     image-rendering: pixelated;
   }
 
@@ -1148,28 +1267,30 @@ def operator_desk(request: Request) -> str:
     z-index: 50;
     background: linear-gradient(
       rgba(72, 50, 122, 0) 50%,
-      rgba(35, 18, 65, 0.22) 50%
+      rgba(35, 18, 65, 0.12) 50%
     );
     background-size: 100% 4px;
+    opacity: 0.10;
   }
 
   /* Custom Scrollbar */
   ::-webkit-scrollbar { width: 8px; height: 8px; }
-  ::-webkit-scrollbar-track { background: #251642; }
-  ::-webkit-scrollbar-thumb { background: #48327a; border: 1px solid #9b74b8; }
+  ::-webkit-scrollbar-track { background: rgba(16, 8, 34, 0.6); }
+  ::-webkit-scrollbar-thumb { background: #48327a; border: 1px solid #9b74b8; border-radius: 4px; }
   ::-webkit-scrollbar-thumb:hover { background: #ea7d8b; }
 
   /* Header */
   header {
     width: 100%;
     height: 58px;
-    border-bottom: 1px solid rgba(216, 180, 254, 0.3);
+    border-bottom: 1.5px solid rgba(255, 110, 140, 0.4);
     padding: 0 24px;
     z-index: 10;
     flex-shrink: 0;
-    background-color: rgba(53, 35, 93, 0.86);
-    backdrop-filter: blur(8px);
-    box-shadow: 0 4px 20px rgba(35, 18, 65, 0.5);
+    background-color: rgba(24, 12, 48, 0.65);
+    backdrop-filter: blur(14px) saturate(135%);
+    -webkit-backdrop-filter: blur(14px) saturate(135%);
+    box-shadow: 0 4px 20px rgba(10, 4, 24, 0.5);
     display: flex;
     align-items: center;
   }
@@ -1182,7 +1303,7 @@ def operator_desk(request: Request) -> str:
     justify-content: space-between;
   }
   .brand-title {
-    font-family: var(--font-pixel);
+    font-family: var(--font-game);
     font-size: 20px;
     font-weight: 900;
     letter-spacing: 2px;
@@ -1209,11 +1330,11 @@ def operator_desk(request: Request) -> str:
   }
   @keyframes pulse { 0% { opacity: 0.55; } 50% { opacity: 1; } 100% { opacity: 0.55; } }
   .live-label {
-    font-family: var(--font-pixel);
-    font-size: 11px;
+    font-family: var(--font-game);
+    font-size: 0.85rem;
     font-weight: 700;
     color: #fbcfe8;
-    letter-spacing: 1.2px;
+    letter-spacing: 0.08em;
   }
   .v-sep {
     height: 16px;
@@ -1222,26 +1343,24 @@ def operator_desk(request: Request) -> str:
   }
   .nav-btn {
     text-decoration: none;
-    background: rgba(72, 50, 122, 0.92);
+    background: rgba(72, 50, 122, 0.7);
     color: #fef9c3;
-    font-family: var(--font-pixel);
-    font-size: 11px;
+    font-family: var(--font-game);
+    font-size: 0.82rem;
     font-weight: 700;
-    letter-spacing: 1px;
-    padding: 7px 14px;
+    letter-spacing: 0.05em;
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: 1.5px solid rgba(255, 110, 140, 0.5);
     text-transform: uppercase;
-    box-shadow:
-      inset 0 0 0 2px rgba(45, 25, 75, 0.9),
-      0 0 0 2px var(--twilight-lilac);
-    transition: all 0.12s;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+    transition: all 0.15s;
   }
   .nav-btn:hover {
-    background: #5c3e9b;
+    background: rgba(234, 125, 139, 0.35);
     color: #fff;
-    box-shadow:
-      inset 0 0 0 2px rgba(45, 25, 75, 0.9),
-      0 0 0 2px var(--sunset-pink),
-      0 0 10px rgba(234, 125, 139, 0.45);
+    border-color: var(--sunset-pink);
+    box-shadow: 0 0 12px rgba(234, 125, 139, 0.5);
   }
 
   /* Main Split */
@@ -1305,34 +1424,33 @@ def operator_desk(request: Request) -> str:
 
   /* Sunset Arcade Panels */
   .pixel-panel {
-    background-color: rgba(53, 35, 93, 0.88);
-    backdrop-filter: blur(10px);
-    border-radius: 6px;
+    background: rgba(24, 12, 48, 0.52);
+    backdrop-filter: blur(14px) saturate(135%);
+    -webkit-backdrop-filter: blur(14px) saturate(135%);
+    border: 1.5px solid rgba(255, 110, 140, 0.55);
+    border-radius: 8px;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     box-shadow:
-      0 0 0 2px var(--sunset-pink),
-      0 0 0 4px var(--twilight-purple),
-      0 0 0 6px #241442,
-      0 15px 35px rgba(25, 10, 48, 0.65),
-      0 0 25px rgba(234, 125, 139, 0.22);
+      0 15px 35px rgba(10, 4, 24, 0.6),
+      0 0 25px rgba(234, 125, 139, 0.25);
   }
   .panel-header {
     padding: 14px 20px;
-    border-bottom: 1px solid rgba(249, 168, 212, 0.3);
+    border-bottom: 1.5px solid rgba(255, 110, 140, 0.35);
     display: flex;
     align-items: center;
     justify-content: space-between;
     flex-shrink: 0;
   }
   .panel-title {
-    font-family: var(--font-pixel);
+    font-family: var(--font-game);
     font-size: 16px;
     font-weight: 800;
     color: #ffffff;
     letter-spacing: 0.8px;
-    text-shadow: 0 0 8px rgba(234, 125, 139, 0.65);
+    text-shadow: 0 0 10px rgba(234, 125, 139, 0.75);
   }
   .panel-content {
     flex: 1;
@@ -1350,12 +1468,12 @@ def operator_desk(request: Request) -> str:
     gap: 6px;
   }
   .form-group label {
-    font-family: var(--font-pixel);
-    font-size: 14px;
-    font-weight: 800;
+    font-family: var(--font-sans);
+    font-size: 0.85rem;
+    font-weight: 700;
     text-transform: uppercase;
     color: #fbcfe8;
-    letter-spacing: 1px;
+    letter-spacing: 0.08em;
   }
   .req-star { color: var(--neon-cyan); }
   .form-row {
@@ -1365,22 +1483,24 @@ def operator_desk(request: Request) -> str:
   }
   .pixel-input {
     width: 100%;
-    background-color: var(--input-bg);
-    border: 2px solid #5a3c8c;
-    box-shadow: inset 2px 2px 0 #140b29;
-    border-radius: 4px;
-    padding: 10px 13px;
-    color: #fef9c3;
-    font-family: var(--font-pixel);
-    font-size: 14px;
-    letter-spacing: 0.5px;
+    background: rgba(16, 8, 34, 0.55);
+    border: 1.5px solid rgba(155, 116, 184, 0.45);
+    box-shadow: inset 1px 1px 3px rgba(0, 0, 0, 0.4);
+    border-radius: 6px;
+    padding: 14px 16px;
+    color: #ffffff;
+    font-family: var(--font-sans);
+    font-size: 0.95rem;
+    letter-spacing: 0.03em;
     outline: none;
-    transition: border-color 0.15s, box-shadow 0.15s;
+    line-height: 1.5;
+    transition: border-color 0.15s, box-shadow 0.15s, background-color 0.15s;
   }
-  .pixel-input::placeholder { color: #a855f7; opacity: 0.75; }
+  .pixel-input::placeholder { color: rgba(216, 180, 254, 0.55); opacity: 0.75; }
   .pixel-input:focus {
     border-color: var(--sunset-pink);
-    box-shadow: inset 2px 2px 0 #140b29, 0 0 10px rgba(234, 125, 139, 0.55);
+    background: rgba(20, 10, 42, 0.75);
+    box-shadow: inset 1px 1px 3px rgba(0, 0, 0, 0.4), 0 0 12px rgba(234, 125, 139, 0.45);
   }
 
   /* Camera Viewfinder */
@@ -1389,9 +1509,9 @@ def operator_desk(request: Request) -> str:
     width: 100%;
     aspect-ratio: 4 / 3;
     max-height: 44vh;
-    background: #1a0e30;
-    border: 2px solid #5a3c8c;
-    border-radius: 4px;
+    background: rgba(16, 8, 34, 0.7);
+    border: 1.5px solid rgba(155, 116, 184, 0.45);
+    border-radius: 6px;
     overflow: hidden;
     display: flex;
     align-items: center;
@@ -1489,12 +1609,13 @@ def operator_desk(request: Request) -> str:
   .camera-placeholder {
     position: absolute;
     color: #fbcfe8;
-    font-family: var(--font-pixel);
-    font-size: 11px;
+    font-family: var(--font-sans);
+    font-size: 0.90rem;
     line-height: 1.6;
     text-align: center;
     padding: 14px;
-    background: rgba(26, 14, 48, 0.85);
+    background: rgba(16, 8, 34, 0.85);
+    border-radius: 6px;
     z-index: 12;
   }
 
@@ -1508,22 +1629,22 @@ def operator_desk(request: Request) -> str:
   button {
     cursor: pointer;
     border: none;
-    border-radius: 4px;
-    font-family: var(--font-pixel);
+    border-radius: 6px;
+    font-family: var(--font-sans);
     text-transform: uppercase;
-    letter-spacing: 1px;
+    letter-spacing: 0.05em;
     transition: all 0.1s;
   }
   .btn-primary {
     background: var(--retro-green);
     color: #14260d;
-    padding: 13px 16px;
-    font-size: 16px;
-    font-weight: 900;
+    padding: 14px 16px;
+    font-size: 0.95rem;
+    font-weight: 800;
     box-shadow:
-      inset 0 3px 0 #a7f3d0,
-      inset 0 -4px 0 #15803d,
-      0 4px 0 #000,
+      inset 0 2px 0 #a7f3d0,
+      inset 0 -3px 0 #15803d,
+      0 3px 0 #000,
       0 0 14px rgba(88, 192, 56, 0.55);
   }
   .btn-primary:hover { background: #68d644; }
@@ -1532,23 +1653,24 @@ def operator_desk(request: Request) -> str:
     box-shadow:
       inset 0 2px 0 #a7f3d0,
       inset 0 -2px 0 #15803d,
-      0 2px 0 #000;
+      0 1px 0 #000;
   }
   .btn-secondary {
-    background: rgba(72, 50, 122, 0.92);
+    background: rgba(72, 50, 122, 0.7);
     color: #fce7f3;
-    padding: 11px 16px;
-    font-size: 14px;
+    padding: 14px 16px;
+    font-size: 0.90rem;
     font-weight: 700;
-    border: 1px solid rgba(192, 132, 252, 0.45);
+    border: 1.5px solid rgba(192, 132, 252, 0.45);
     box-shadow:
       inset 0 2px 0 #6d4a96,
       inset 0 -3px 0 #1e0f36,
       0 3px 0 #000;
   }
   .btn-secondary:hover {
-    background: #583d94;
+    background: rgba(234, 125, 139, 0.35);
     color: #fff;
+    border-color: var(--sunset-pink);
     box-shadow:
       inset 0 2px 0 #8b5fb8,
       inset 0 -3px 0 #1e0f36,
@@ -1558,19 +1680,21 @@ def operator_desk(request: Request) -> str:
   /* Assigned / Warning Status Cards */
   .registered-card {
     display: none;
-    background: rgba(36, 22, 69, 0.92);
-    border: 2px solid var(--neon-cyan);
-    border-radius: 4px;
-    padding: 12px 14px;
+    background: rgba(16, 8, 34, 0.75);
+    border: 1.5px solid var(--neon-cyan);
+    backdrop-filter: blur(10px);
+    border-radius: 6px;
+    padding: 14px 16px;
     margin-top: 2px;
     box-shadow: 0 0 15px rgba(0, 240, 255, 0.25);
   }
   .reg-tag {
-    font-family: var(--font-pixel);
-    font-size: 28px;
-    font-weight: 900;
+    font-family: var(--font-sans);
+    font-size: 1.8rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
     color: var(--neon-cyan);
-    letter-spacing: 2px;
+    letter-spacing: 0.03em;
     margin: 4px 0;
     text-shadow: 0 0 14px rgba(0, 240, 255, 0.6);
   }
@@ -1581,45 +1705,111 @@ def operator_desk(request: Request) -> str:
     border-collapse: collapse;
   }
   .roster-table th {
-    background: rgba(61, 39, 107, 0.85);
-    padding: 11px 12px;
-    font-family: var(--font-pixel);
-    font-size: 13px;
-    font-weight: 800;
+    background: #180c30;
+    background: rgba(22, 11, 46, 0.98);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    padding: 14px 16px;
+    font-family: var(--font-game);
+    font-size: 0.85rem;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 1px;
+    letter-spacing: 0.08em;
     color: #fbcfe8;
     text-align: left;
-    border-bottom: 1px solid rgba(249, 168, 212, 0.35);
+    border-bottom: 1.5px solid rgba(255, 110, 140, 0.35);
     position: sticky;
     top: 0;
-    z-index: 2;
+    z-index: 15;
+    box-shadow: 0 4px 12px rgba(10, 4, 24, 0.5);
   }
   .roster-table td {
-    padding: 10px 12px;
-    font-size: 14px;
-    border-bottom: 1px solid rgba(168, 85, 247, 0.22);
-    transition: background-color 0.2s, box-shadow 0.2s;
+    padding: 14px 16px;
+    font-family: var(--font-sans);
+    font-size: 1.05rem; /* upgraded from font-size: 14px */
+    background: rgba(16, 8, 34, 0.45);
+    border-bottom: 1px solid rgba(255, 110, 140, 0.2);
+    line-height: 1.5;
+    transition: background-color 0.15s, box-shadow 0.15s;
   }
   .roster-table tbody tr:hover td {
-    background: rgba(72, 50, 122, 0.55);
+    background: rgba(255, 255, 255, 0.06);
   }
-  .roster-table tbody tr.row-highlight td {
+  .roster-table tbody tr.row-highlight td,
+  .roster-table tbody tr.selected td {
     background: rgba(255, 209, 82, 0.22) !important;
     border-top: 1px solid var(--sunset-gold);
     border-bottom: 1px solid var(--sunset-gold);
   }
+  .roster-table tbody tr.row-highlight td.name-cell .name-text,
+  .roster-table tbody tr.selected td.name-cell .name-text {
+    color: #ffd152 !important;
+    -webkit-text-fill-color: #ffd152 !important;
+    background: none !important;
+    filter: drop-shadow(2px 2px 0 #3d2402) drop-shadow(0 0 10px rgba(255, 209, 82, 0.95)) !important;
+  }
+  .photo-thumb-container {
+    position: relative;
+    width: 36px;
+    height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .photo-thumb-container .thumb-img,
+  .photo-thumb-container .thumb-placeholder {
+    width: 36px;
+    height: 36px;
+    transition: filter 0.15s ease, transform 0.15s ease;
+  }
+  .photo-thumb-container:hover .thumb-img,
+  .photo-thumb-container:hover .thumb-placeholder {
+    filter: brightness(0.35) blur(1px);
+  }
+  .thumb-del-btn {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(225, 29, 72, 0.92);
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    box-shadow: 0 0 8px rgba(225, 29, 72, 0.75);
+    transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease;
+  }
+  .photo-thumb-container:hover .thumb-del-btn {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .thumb-del-btn:hover {
+    background: #e11d48;
+    color: #ffffff;
+    transform: scale(1.05);
+    box-shadow: 0 0 12px rgba(225, 29, 72, 0.95);
+  }
+  .thumb-del-btn:active {
+    transform: scale(0.95);
+  }
   .thumb-img {
-    width: 34px;
-    height: 34px;
+    width: 36px;
+    height: 36px;
     border-radius: 4px;
     object-fit: cover;
     background: #2b184a;
     border: 1px solid rgba(192, 132, 252, 0.45);
   }
   .thumb-placeholder {
-    width: 34px;
-    height: 34px;
+    width: 36px;
+    height: 36px;
     border-radius: 4px;
     background: #2b184a;
     border: 1px solid rgba(192, 132, 252, 0.45);
@@ -1630,26 +1820,53 @@ def operator_desk(request: Request) -> str:
     color: #d8b4fe;
   }
   .pid-badge {
-    font-family: var(--font-pixel);
-    font-size: 15px;
-    font-weight: 800;
+    font-family: var(--font-game);
+    font-size: 1.10rem; /* font-size: 15px */
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
     color: var(--neon-cyan);
+    letter-spacing: 0.04em;
     text-shadow: 0 0 6px rgba(0, 240, 255, 0.7);
   }
   .roll-badge {
     display: inline-block;
-    background: var(--twilight-dark);
+    background: rgba(16, 8, 34, 0.65);
     border: 1px solid rgba(234, 125, 139, 0.5);
     padding: 4px 10px;
     border-radius: 4px;
-    font-family: var(--font-pixel);
-    font-size: 14px;
+    font-family: var(--font-game);
+    font-size: 1.00rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.03em;
     color: #fbcfe8;
   }
   .height-cell {
-    font-family: var(--font-pixel);
-    font-size: 13px;
+    font-family: var(--font-game);
+    font-size: 1.00rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.03em;
     color: var(--sunset-peach);
+  }
+  .roster-table td.name-cell {
+    font-family: var(--font-game);
+    font-size: 1.15rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: #f5d0fe;
+  }
+  .roster-table td.name-cell .name-text {
+    display: inline-block;
+    color: #ffffff;
+    background: linear-gradient(180deg, #ffffff 15%, #f5d0fe 45%, #d8b4fe 75%, #a855f7 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(2px 2px 0 #1e0538) drop-shadow(0 0 6px rgba(192, 132, 252, 0.45));
+    transition: filter 0.15s ease;
+  }
+  .roster-table tbody tr:hover td.name-cell .name-text {
+    filter: drop-shadow(2px 2px 0 #1e0538) drop-shadow(0 0 10px rgba(232, 121, 249, 0.75));
   }
   .btn-action-qr {
     background: rgba(53, 35, 93, 0.85);
@@ -1658,7 +1875,7 @@ def operator_desk(request: Request) -> str:
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    padding: 6px;
+    padding: 8px;
     border-radius: 6px;
     cursor: pointer;
     transition: background 0.15s, color 0.15s, box-shadow 0.15s, transform 0.1s;
@@ -1677,7 +1894,7 @@ def operator_desk(request: Request) -> str:
     position: fixed;
     inset: 0;
     background: rgba(18, 9, 32, 0.85);
-    backdrop-filter: blur(6px);
+    backdrop-filter: blur(8px);
     z-index: 100;
     display: flex;
     align-items: center;
@@ -1685,27 +1902,28 @@ def operator_desk(request: Request) -> str:
     padding: 16px;
   }
   .modal-card {
-    background: #241442;
-    border: 2px solid var(--sunset-gold);
+    background: rgba(24, 12, 48, 0.92);
+    backdrop-filter: blur(14px);
+    border: 1.5px solid var(--sunset-gold);
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.8), 0 0 20px rgba(255, 209, 82, 0.4);
     border-radius: 8px;
     width: 100%;
-    max-width: 420px;
+    max-width: 440px;
     overflow: hidden;
     display: flex;
     flex-direction: column;
   }
   .modal-header {
-    background: #35235d;
-    padding: 12px 16px;
+    background: rgba(53, 35, 93, 0.85);
+    padding: 14px 18px;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    border-bottom: 1px solid rgba(255, 209, 82, 0.3);
+    border-bottom: 1.5px solid rgba(255, 209, 82, 0.3);
   }
   .modal-title {
     font-family: var(--font-pixel);
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 800;
     color: var(--sunset-gold);
     letter-spacing: 1px;
@@ -1714,7 +1932,7 @@ def operator_desk(request: Request) -> str:
     background: none;
     border: none;
     color: #fbcfe8;
-    font-size: 18px;
+    font-size: 20px;
     font-weight: 800;
     cursor: pointer;
     padding: 0 4px;
@@ -1722,11 +1940,11 @@ def operator_desk(request: Request) -> str:
   }
   .modal-close-btn:hover { color: var(--sunset-pink); }
   .modal-body {
-    padding: 20px;
+    padding: 22px;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 14px;
+    gap: 16px;
   }
   .modal-qr-img {
     width: 200px;
@@ -1737,15 +1955,15 @@ def operator_desk(request: Request) -> str:
     box-shadow: 0 0 16px rgba(255, 209, 82, 0.3);
   }
   .modal-info {
-    font-family: var(--font-pixel);
-    font-size: 11px;
+    font-family: var(--font-sans);
+    font-size: 0.95rem;
     color: #fbcfe8;
     text-align: center;
     line-height: 1.5;
   }
   .modal-actions {
     display: flex;
-    gap: 10px;
+    gap: 12px;
     width: 100%;
     margin-top: 4px;
   }
@@ -1753,25 +1971,27 @@ def operator_desk(request: Request) -> str:
     flex: 1;
     background: linear-gradient(135deg, #ea7d8b, #fca289);
     color: #1f0b2e;
-    font-family: var(--font-pixel);
-    font-size: 12px;
+    font-family: var(--font-sans);
+    font-size: 0.90rem;
     font-weight: 800;
-    padding: 10px 12px;
-    border-radius: 4px;
+    letter-spacing: 0.05em;
+    padding: 12px 14px;
+    border-radius: 6px;
     text-align: center;
     text-decoration: none;
     border: none;
   }
   .modal-btn-secondary {
     flex: 1;
-    background: #35235d;
-    border: 1px solid var(--neon-cyan);
+    background: rgba(53, 35, 93, 0.8);
+    border: 1.5px solid var(--neon-cyan);
     color: var(--neon-cyan);
-    font-family: var(--font-pixel);
-    font-size: 12px;
+    font-family: var(--font-sans);
+    font-size: 0.90rem;
     font-weight: 800;
-    padding: 10px 12px;
-    border-radius: 4px;
+    letter-spacing: 0.05em;
+    padding: 12px 14px;
+    border-radius: 6px;
     text-align: center;
     text-decoration: none;
   }
@@ -1818,23 +2038,29 @@ def operator_desk(request: Request) -> str:
       </div>
 
       <div class="form-group">
-        <label>LIVE WEBCAM PHOTO</label>
-        <div class="camera-container">
-          <div class="vf-corner vf-tl"></div>
-          <div class="vf-corner vf-tr"></div>
-          <div class="vf-corner vf-bl"></div>
-          <div class="vf-corner vf-br"></div>
-          <div class="vf-rec"><span class="vf-rec-dot"></span><span>REC 720P</span></div>
-          <div class="vf-sensor">[ SENSOR ACTIVE ]</div>
-          <div class="vf-guide">
-            <div class="vf-guide-box">
-              <span class="vf-guide-top">FACE ALIGN</span>
-              <span class="vf-guide-bot">[ READY ]</span>
-            </div>
+        <label style="display: flex; justify-content: space-between; align-items: center;">
+          <span>PLAYER PHOTO</span>
+          <span id="photo-status-badge" style="font-family: var(--font-game); font-size: 11px; color: #fbcfe8; letter-spacing: 0.5px;">[ OPTIONAL ]</span>
+        </label>
+        <div class="photo-picker-container" style="display: flex; gap: 14px; align-items: center; padding: 14px; background: rgba(16, 8, 34, 0.55); border: 1.5px solid rgba(155, 116, 184, 0.45); border-radius: 6px;">
+          <div id="photo-preview-box" style="width: 82px; height: 82px; border-radius: 6px; background: #2b184a; border: 1.5px solid rgba(192, 132, 252, 0.45); display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; flex-shrink: 0; box-shadow: inset 0 0 10px rgba(0,0,0,0.6);">
+            <span id="preview-placeholder" style="font-size: 36px; filter: drop-shadow(0 0 4px rgba(216, 180, 254, 0.5));">👤</span>
+            <img id="preview-img" src="" alt="Photo Preview" style="display: none; width: 100%; height: 100%; object-fit: cover;" />
           </div>
-          <video id="webcam" autoplay playsinline muted></video>
-          <div id="cam-placeholder" class="camera-placeholder" style="display:none;">
-            WEBCAM UNAVAILABLE.<br>PLAYER CAN STILL REGISTER WITHOUT A PHOTO.
+          <div style="flex: 1; display: flex; flex-direction: column; gap: 8px;">
+            <button id="btn-open-camera" type="button" class="btn-camera" onclick="openCameraModal()" style="display: flex; align-items: center; justify-content: center; gap: 8px; background: rgba(53, 35, 93, 0.85); border: 1.5px solid var(--neon-cyan); color: var(--neon-cyan); font-family: var(--font-game); font-size: 0.82rem; padding: 10px 14px; border-radius: 6px; cursor: pointer; text-transform: uppercase; letter-spacing: 0.05em; box-shadow: 0 0 10px rgba(0, 240, 255, 0.25); transition: all 0.15s;">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
+                <circle cx="12" cy="13" r="4"></circle>
+              </svg>
+              <span id="btn-camera-text">Take Photo</span>
+            </button>
+            <button id="btn-clear-photo" type="button" onclick="clearPhoto()" style="display: none; background: rgba(225, 29, 72, 0.25); border: 1px solid rgba(225, 29, 72, 0.6); color: #fca5a5; font-family: var(--font-sans); font-size: 0.78rem; font-weight: 700; padding: 6px 10px; border-radius: 4px; cursor: pointer; text-transform: uppercase;">
+              ✕ Remove Photo
+            </button>
+            <div id="photo-hint" style="font-size: 11px; color: #d8b4fe; line-height: 1.3;">
+              Click button to open wide-angle camera viewfinder.
+            </div>
           </div>
         </div>
       </div>
@@ -1886,7 +2112,7 @@ def operator_desk(request: Request) -> str:
   <section class="pixel-panel" id="right-panel" style="flex: 1; min-width: 300px;">
     <div class="panel-header">
       <div class="panel-title">Registered Participants</div>
-      <span id="player-count" style="font-family: var(--font-pixel); font-size: 13px; color: var(--sunset-gold); font-weight: 800; text-shadow: 0 0 6px rgba(255, 209, 82, 0.6);">Total: 0</span>
+      <span id="player-count" style="font-family: var(--font-game); font-size: 13px; color: var(--sunset-gold); font-weight: 800; text-shadow: 0 0 6px rgba(255, 209, 82, 0.6);">Total: 0</span>
     </div>
     <div class="panel-content" style="padding: 16px 20px;">
       <input type="text" id="roster-search" class="pixel-input" placeholder="Search by Name, URN, or Player ID (e.g. P001, 24303192)..." oninput="filterRoster()" />
@@ -1916,6 +2142,48 @@ def operator_desk(request: Request) -> str:
 
 <canvas id="snapshot-canvas" style="display:none;"></canvas>
 
+<!-- Modal for Wide-Angle Camera Viewfinder -->
+<div id="camera-modal" class="modal-backdrop" style="display: none;" onclick="if(event.target===this)closeCameraModal()">
+  <div class="modal-card" style="max-width: 680px; width: 92vw;">
+    <div class="modal-header">
+      <div class="modal-title" style="font-family: var(--font-game); font-size: 14px; display: flex; align-items: center; gap: 8px;">
+        <span>📸</span>
+        <span>CAMERA VIEWFINDER</span>
+      </div>
+      <button class="modal-close-btn" type="button" onclick="closeCameraModal()">✕</button>
+    </div>
+    <div class="modal-body" style="padding: 18px;">
+      <div class="camera-container" style="position: relative; width: 100%; aspect-ratio: 4 / 3; max-height: 44vh; background: rgba(16, 8, 34, 0.85); border: 1.5px solid rgba(155, 116, 184, 0.45); border-radius: 6px; overflow: hidden; display: flex; align-items: center; justify-content: center; box-shadow: inset 0 0 18px rgba(0,0,0,0.7);">
+        <div class="vf-corner vf-tl"></div>
+        <div class="vf-corner vf-tr"></div>
+        <div class="vf-corner vf-bl"></div>
+        <div class="vf-corner vf-br"></div>
+        <div class="vf-rec"><span class="vf-rec-dot"></span><span>REC 720P</span></div>
+        <div class="vf-sensor">[ SENSOR ACTIVE ]</div>
+        <div class="vf-guide">
+          <div class="vf-guide-box">
+            <span class="vf-guide-top">FACE ALIGN</span>
+            <span class="vf-guide-bot">[ READY ]</span>
+          </div>
+        </div>
+        <video id="modal-webcam" autoplay playsinline muted style="width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1);"></video>
+        <div id="cam-placeholder" class="camera-placeholder" style="display:none;">
+          WEBCAM UNAVAILABLE.<br>PLAYER CAN STILL REGISTER WITHOUT A PHOTO.
+        </div>
+      </div>
+      <div style="display: flex; gap: 12px; width: 100%; margin-top: 14px;">
+        <button id="btn-modal-capture" class="btn-primary" type="button" onclick="captureFromModal()" style="flex: 2; display: flex; align-items: center; justify-content: center; gap: 8px; font-family: var(--font-game);">
+          <span>📸</span>
+          <span>Capture Photo</span>
+        </button>
+        <button class="btn-secondary" type="button" onclick="closeCameraModal()" style="flex: 1; font-family: var(--font-game);">
+          Cancel
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Modal for QR & Souvenir Card -->
 <div id="qr-modal" class="modal-backdrop" style="display: none;" onclick="if(event.target===this)closeQrModal()">
   <div class="modal-card">
@@ -1937,38 +2205,104 @@ def operator_desk(request: Request) -> str:
 
 <script>
   let videoStream = null;
-  const videoEl = document.getElementById('webcam');
+  const modalVideoEl = document.getElementById('modal-webcam');
   const canvasEl = document.getElementById('snapshot-canvas');
   const camPlaceholder = document.getElementById('cam-placeholder');
+  let pendingPhotoBase64 = null;
   let allPlayers = [];
   let highlightedPid = null;
+  let selectedPid = null;
 
-  async function initCamera() {
+  async function openCameraModal() {
+    document.getElementById('camera-modal').style.display = 'flex';
+    if (camPlaceholder) camPlaceholder.style.display = 'none';
     try {
       if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
         videoStream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
+          video: { width: { ideal: 1280, min: 640 }, height: { ideal: 720, min: 480 }, facingMode: "user" },
           audio: false
         });
-        videoEl.srcObject = videoStream;
-        camPlaceholder.style.display = 'none';
+        if (modalVideoEl) modalVideoEl.srcObject = videoStream;
       } else {
-        camPlaceholder.style.display = 'block';
+        if (camPlaceholder) camPlaceholder.style.display = 'block';
       }
     } catch (err) {
-      camPlaceholder.style.display = 'block';
+      if (camPlaceholder) camPlaceholder.style.display = 'block';
     }
   }
 
-  function capturePhotoBase64() {
-    if (!videoStream || !videoEl.videoWidth) return null;
-    canvasEl.width = videoEl.videoWidth;
-    canvasEl.height = videoEl.videoHeight;
+  function stopCameraStream() {
+    if (videoStream) {
+      videoStream.getTracks().forEach(t => t.stop());
+      videoStream = null;
+    }
+    if (modalVideoEl) {
+      modalVideoEl.srcObject = null;
+    }
+  }
+
+  function closeCameraModal() {
+    stopCameraStream();
+    document.getElementById('camera-modal').style.display = 'none';
+  }
+
+  function captureFromModal() {
+    if (!videoStream || !modalVideoEl || !modalVideoEl.videoWidth) {
+      closeCameraModal();
+      return;
+    }
+    canvasEl.width = modalVideoEl.videoWidth;
+    canvasEl.height = modalVideoEl.videoHeight;
     const ctx = canvasEl.getContext('2d');
     ctx.translate(canvasEl.width, 0);
     ctx.scale(-1, 1);
-    ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
-    return canvasEl.toDataURL('image/jpeg', 0.85);
+    ctx.drawImage(modalVideoEl, 0, 0, canvasEl.width, canvasEl.height);
+    pendingPhotoBase64 = canvasEl.toDataURL('image/jpeg', 0.88);
+
+    setPhotoPreview(pendingPhotoBase64, true);
+    closeCameraModal();
+  }
+
+  function setPhotoPreview(dataUrl, isNewPending) {
+    const previewImg = document.getElementById('preview-img');
+    const placeholder = document.getElementById('preview-placeholder');
+    const clearBtn = document.getElementById('btn-clear-photo');
+    const badge = document.getElementById('photo-status-badge');
+    const camBtnText = document.getElementById('btn-camera-text');
+
+    if (dataUrl) {
+      previewImg.src = dataUrl;
+      previewImg.style.display = 'block';
+      placeholder.style.display = 'none';
+      if (isNewPending) {
+        clearBtn.style.display = 'inline-block';
+        badge.textContent = '[ PHOTO READY ✓ ]';
+        badge.style.color = '#38ef7d';
+        camBtnText.textContent = 'Retake Photo';
+      } else {
+        clearBtn.style.display = 'none';
+        badge.textContent = '[ SAVED PHOTO ]';
+        badge.style.color = '#00f0ff';
+        camBtnText.textContent = 'Change Photo';
+      }
+    }
+  }
+
+  function clearPhoto() {
+    pendingPhotoBase64 = null;
+    const previewImg = document.getElementById('preview-img');
+    const placeholder = document.getElementById('preview-placeholder');
+    const clearBtn = document.getElementById('btn-clear-photo');
+    const badge = document.getElementById('photo-status-badge');
+    const camBtnText = document.getElementById('btn-camera-text');
+
+    previewImg.style.display = 'none';
+    previewImg.src = '';
+    placeholder.style.display = 'block';
+    clearBtn.style.display = 'none';
+    badge.textContent = '[ OPTIONAL ]';
+    badge.style.color = '#fbcfe8';
+    camBtnText.textContent = 'Take Photo';
   }
 
   async function handleRegister(withPhoto) {
@@ -1983,9 +2317,14 @@ def operator_desk(request: Request) -> str:
       return;
     }
 
+    if (withPhoto && !pendingPhotoBase64) {
+      openCameraModal();
+      return;
+    }
+
     const roll_no = rollInput.value.trim() || null;
     const height_cm = heightInput.value ? parseFloat(heightInput.value) : null;
-    const photo_base64 = withPhoto ? capturePhotoBase64() : null;
+    const photo_base64 = withPhoto ? pendingPhotoBase64 : null;
 
     const urlPin = new URLSearchParams(window.location.search).get('pin');
     const reqHeaders = { 'Content-Type': 'application/json' };
@@ -2013,7 +2352,6 @@ def operator_desk(request: Request) -> str:
           warnCard.style.display = 'block';
         }
 
-        // Keep all participants visible; highlight and scroll to the existing row
         const searchInput = document.getElementById('roster-search');
         if (searchInput && searchInput.value) {
           searchInput.value = '';
@@ -2047,6 +2385,7 @@ def operator_desk(request: Request) -> str:
       nameInput.value = '';
       rollInput.value = '';
       heightInput.value = '';
+      clearPhoto();
       nameInput.focus();
 
       loadRoster();
@@ -2068,6 +2407,44 @@ def operator_desk(request: Request) -> str:
       }
     } catch (e) {
       // offline
+    }
+  }
+
+  function selectPlayerRow(pid) {
+    selectedPid = pid;
+    const p = allPlayers.find(item => item.player_id === pid);
+    if (!p) return;
+
+    document.querySelectorAll('.roster-table tbody tr').forEach(tr => {
+      tr.classList.remove('selected');
+    });
+    const tr = document.getElementById('row-' + pid);
+    if (tr) tr.classList.add('selected');
+
+    const nameInput = document.getElementById('player-name');
+    const rollInput = document.getElementById('player-roll');
+    const heightInput = document.getElementById('player-height');
+    if (nameInput) nameInput.value = p.name || '';
+    if (rollInput) rollInput.value = p.roll_no || '';
+    if (heightInput) heightInput.value = p.height_cm != null ? p.height_cm : '';
+
+    const successCard = document.getElementById('reg-success');
+    const warnCard = document.getElementById('reg-warning');
+    if (warnCard) warnCard.style.display = 'none';
+
+    if (successCard) {
+      document.getElementById('reg-pid').textContent = p.player_id;
+      document.getElementById('reg-name').textContent = 'Name: ' + p.name;
+      document.getElementById('reg-roll').textContent = 'URN: ' + (p.roll_no || 'None');
+      document.getElementById('reg-qr-img').src = '/api/qr/' + p.player_id + '?t=' + Date.now();
+      document.getElementById('reg-card-link').href = '/api/cards/' + p.player_id + '/download';
+      successCard.style.display = 'block';
+    }
+
+    if (p.photo_url) {
+      setPhotoPreview(p.photo_url, false);
+    } else {
+      clearPhoto();
     }
   }
 
@@ -2098,16 +2475,33 @@ def operator_desk(request: Request) -> str:
         ? `<span class="roll-badge">${p.roll_no}</span>`
         : `<span style="color: #c084fc;">-</span>`;
       const heightHtml = p.height_cm ? `<span class="height-cell">${p.height_cm} cm</span>` : `<span style="color: #c084fc;">-</span>`;
-      const hlClass = (highlightedPid && p.player_id === highlightedPid) ? 'row-highlight' : '';
+      let rowClass = '';
+      if (highlightedPid && p.player_id === highlightedPid) {
+        rowClass = 'row-highlight';
+      } else if (selectedPid && p.player_id === selectedPid) {
+        rowClass = 'selected';
+      }
 
-      return `<tr id="row-${p.player_id}" class="${hlClass}">
-        <td>${photoHtml}</td>
+      return `<tr id="row-${p.player_id}" class="${rowClass}" onclick="selectPlayerRow('${p.player_id}')" style="cursor: pointer;">
+        <td>
+          <div class="photo-thumb-container">
+            ${photoHtml}
+            <button class="thumb-del-btn" type="button" title="Delete player ${p.name.replace(/'/g, "\\'")}" onclick="event.stopPropagation(); deletePlayer('${p.player_id}', '${p.name.replace(/'/g, "\\'")}')">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                <line x1="10" y1="11" x2="10" y2="17"></line>
+                <line x1="14" y1="11" x2="14" y2="17"></line>
+              </svg>
+            </button>
+          </div>
+        </td>
         <td><span class="pid-badge">${p.player_id}</span></td>
-        <td style="font-weight: 700; color: #fff;">${p.name}</td>
+        <td class="name-cell"><span class="name-text">${p.name}</span></td>
         <td>${rollHtml}</td>
         <td>${heightHtml}</td>
         <td style="text-align: center;">
-          <button class="btn-action-qr" type="button" title="Open Photocard QR &amp; Download" onclick="openQrModal('${p.player_id}', '${p.name.replace(/'/g, "\\'")}')">
+          <button class="btn-action-qr" type="button" title="Open Photocard QR &amp; Download" onclick="event.stopPropagation(); openQrModal('${p.player_id}', '${p.name.replace(/'/g, "\\'")}')">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display: block;">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
               <polyline points="7 10 12 15 17 10"></polyline>
@@ -2117,6 +2511,42 @@ def operator_desk(request: Request) -> str:
         </td>
       </tr>`;
     }).join('');
+  }
+
+  async function deletePlayer(pid, name) {
+    if (!confirm('Are you sure you want to delete participant ' + name + ' (' + pid + ')?')) {
+      return;
+    }
+    const urlPin = new URLSearchParams(window.location.search).get('pin');
+    const reqHeaders = {};
+    if (urlPin) {
+      reqHeaders['X-Operator-Pin'] = urlPin;
+    }
+    try {
+      const res = await fetch('/api/players/' + encodeURIComponent(pid), {
+        method: 'DELETE',
+        headers: reqHeaders,
+      });
+      if (res.ok) {
+        const successCard = document.getElementById('reg-success');
+        if (successCard && document.getElementById('reg-pid').textContent === pid) {
+          successCard.style.display = 'none';
+        }
+        const warnCard = document.getElementById('reg-warning');
+        if (warnCard && document.getElementById('warn-pid').textContent === pid) {
+          warnCard.style.display = 'none';
+        }
+        if (selectedPid === pid) {
+          selectedPid = null;
+        }
+        loadRoster();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert('Failed to delete player: ' + (err.detail || res.statusText));
+      }
+    } catch (e) {
+      alert('Error deleting player: ' + e.message);
+    }
   }
 
   function openQrModal(pid, name) {
@@ -2160,10 +2590,12 @@ def operator_desk(request: Request) -> str:
   }
 
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeQrModal();
+    if (e.key === 'Escape') {
+      closeQrModal();
+      closeCameraModal();
+    }
   });
 
-  initCamera();
   loadRoster();
   setInterval(loadRoster, 4000);
 
