@@ -66,17 +66,8 @@ L_KNEE, R_KNEE = 25, 26
 L_ANKLE, R_ANKLE = 27, 28
 
 
-def _get_coord(lm: Any, planar_2d: bool = False) -> tuple[float, float, float]:
+def _get_coord(lm: Any) -> tuple[float, float, float]:
     """Extract (x, y, z) coordinate tuple from landmark object, dict, or tuple."""
-    if planar_2d:
-        if isinstance(lm, (tuple, list)):
-            return (float(lm[0]), float(lm[1]), 0.0)
-        if hasattr(lm, "x") and hasattr(lm, "y"):
-            return (float(lm.x), float(lm.y), 0.0)
-        if isinstance(lm, dict) and "x" in lm and "y" in lm:
-            return (float(lm["x"]), float(lm["y"]), 0.0)
-        return (0.0, 0.0, 0.0)
-
     if isinstance(lm, (tuple, list)):
         if len(lm) >= 3:
             return (float(lm[0]), float(lm[1]), float(lm[2]))
@@ -112,7 +103,6 @@ def extract_pose_angles(
     visibility: Sequence[float] | None = None,
     min_vis: float = 0.5,
     mirrored: bool | None = None,
-    planar_2d: bool = False,
 ) -> dict[str, float | None]:
     """Extract all frontal joint angles in degrees (0..180) from a 33-point landmark list.
 
@@ -126,8 +116,8 @@ def extract_pose_angles(
 
     # Check mirror orientation if not explicitly provided
     if mirrored is None:
-        p11 = _get_coord(landmarks[L_SHOULDER], planar_2d=planar_2d)
-        p12 = _get_coord(landmarks[R_SHOULDER], planar_2d=planar_2d)
+        p11 = _get_coord(landmarks[L_SHOULDER])
+        p12 = _get_coord(landmarks[R_SHOULDER])
         # In a mirrored camera view, landmark 12 is on screen-left (smaller x),
         # meaning MediaPipe's 'right' (12) is the player's physical left.
         mirrored = (p12[0] < p11[0])
@@ -155,9 +145,9 @@ def extract_pose_angles(
         v3 = _get_vis(landmarks[p2_idx], p2_idx, visibility)
         if v1 < min_vis or v2 < min_vis or v3 < min_vis:
             return None
-        p1 = _get_coord(landmarks[p1_idx], planar_2d=planar_2d)
-        pv = _get_coord(landmarks[vertex_idx], planar_2d=planar_2d)
-        p2 = _get_coord(landmarks[p2_idx], planar_2d=planar_2d)
+        p1 = _get_coord(landmarks[p1_idx])
+        pv = _get_coord(landmarks[vertex_idx])
+        p2 = _get_coord(landmarks[p2_idx])
         ang = angle_3pts(p1, pv, p2)
         return round(ang, 1) if ang is not None else None
 
@@ -185,12 +175,12 @@ def extract_pose_angles(
     if ls_vis < min_vis or rs_vis < min_vis or lh_vis < min_vis or rh_vis < min_vis:
         torso_tilt = None
     else:
-        ls = _get_coord(landmarks[L_SHOULDER], planar_2d=planar_2d)
-        rs = _get_coord(landmarks[R_SHOULDER], planar_2d=planar_2d)
-        lh = _get_coord(landmarks[L_HIP], planar_2d=planar_2d)
-        rh = _get_coord(landmarks[R_HIP], planar_2d=planar_2d)
+        ls = _get_coord(landmarks[L_SHOULDER])
+        rs = _get_coord(landmarks[R_SHOULDER])
+        lh = _get_coord(landmarks[L_HIP])
+        rh = _get_coord(landmarks[R_HIP])
         dx = (ls[0] + rs[0]) / 2.0 - (lh[0] + rh[0]) / 2.0
-        if not planar_2d and (abs(ls[2]) > 0.05 or abs(lh[2]) > 0.05):
+        if abs(ls[2]) > 0.05 or abs(lh[2]) > 0.05:
             # 3D floor coordinates: Z is vertical height (upward is positive)
             dz = (ls[2] + rs[2]) / 2.0 - (lh[2] + rh[2]) / 2.0
             ang = angle_between_vectors((dx, dz), (0.0, 1.0))
@@ -438,7 +428,6 @@ def evaluate_pose(
     angle_tolerance_override: float | None = None,
     pos_tolerance_override: float | None = None,
     player_tracked: bool = True,
-    player_head_norm: tuple[float, float] | None = None,
 ) -> PoseMatchResult:
     """Compare player joint angles and floor position against a Wall Shape template.
 
@@ -545,22 +534,12 @@ def evaluate_pose(
         elif r_kn_tgt - l_kn_tgt >= 50.0 and l_kn_act - r_kn_act >= 40.0:
             hints.insert(0, "Swap legs! (Bend LEFT knee, stand on RIGHT leg)")
 
-    # Position evaluation (Evaluates head alignment if head point provided; otherwise falls back to floor position)
+    # Position evaluation
     pos_dist = 0.0
     pos_matched = True
     pos_score_pct = 100.0
 
-    if player_head_norm is not None:
-        hx, hy = player_head_norm
-        # Check lateral alignment relative to cutout head center (x=0.50, +/- 0.09)
-        h_diff = abs(hx - 0.50)
-        pos_matched = h_diff <= 0.09
-        pos_dist = h_diff * 1.8
-        pos_score_pct = max(0.0, 100.0 - (h_diff / 0.18) * 100.0)
-        if not pos_matched:
-            p_hint = "Step Left to center head" if hx > 0.50 else "Step Right to center head"
-            hints.insert(0, f"Position: {p_hint}")
-    elif template.target_pos_m is not None:
+    if template.target_pos_m is not None:
         if player_pos_m is not None:
             pos_dist = math.hypot(
                 player_pos_m[0] - template.target_pos_m[0],

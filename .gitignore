@@ -7,10 +7,6 @@ calibration.local.json
 outbox.jsonl
 data/*
 !data/.gitkeep
-!data/poses_index.json
-!data/poses/
-data/poses/*
-!data/poses/*.jpg
 models/*
 !models/.gitkeep
 recordings/
