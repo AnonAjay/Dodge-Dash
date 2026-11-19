@@ -5,8 +5,10 @@ from station_a.logic import (
     SUBTILE_M,
     LavaEngine,
     LavaWave,
+    TournamentPhase,
     WavePattern,
     cells_touched,
+    get_streak_multiplier,
     tiles_touched,
 )
 
@@ -36,6 +38,7 @@ def test_cells_touched_10x10():
 def test_lava_engine_warming_quadratic_ease_in():
     engine = LavaEngine(duration_s=60.0)
     engine.start_game()
+    engine.tournament_phase = TournamentPhase.ROUND_ACTIVE
     # Force a deterministic wave
     mask = [[True] * GRID_SIZE for _ in range(GRID_SIZE)]
     mask[0][0] = False  # (0, 0) safe
@@ -61,6 +64,7 @@ def test_lava_engine_warming_quadratic_ease_in():
 def test_lava_engine_grounded_hit():
     engine = LavaEngine(duration_s=60.0)
     engine.start_game()
+    engine.tournament_phase = TournamentPhase.ROUND_ACTIVE
     # Lava on all cells
     mask = [[True] * GRID_SIZE for _ in range(GRID_SIZE)]
     wave = LavaWave(
@@ -86,6 +90,7 @@ def test_lava_engine_grounded_hit():
 def test_lava_engine_jump_immunity():
     engine = LavaEngine(duration_s=60.0)
     engine.start_game()
+    engine.tournament_phase = TournamentPhase.ROUND_ACTIVE
     mask = [[True] * GRID_SIZE for _ in range(GRID_SIZE)]
     wave = LavaWave(
         pattern=WavePattern.ISLAND,
@@ -109,6 +114,7 @@ def test_lava_engine_jump_immunity():
 def test_lava_engine_safe_island_dodge():
     engine = LavaEngine(duration_s=60.0)
     engine.start_game()
+    engine.tournament_phase = TournamentPhase.ROUND_ACTIVE
     # Everything is lava except central 4x4 block (cells 3..6)
     mask = [[True] * GRID_SIZE for _ in range(GRID_SIZE)]
     for c in range(3, 7):
@@ -180,75 +186,142 @@ def test_build_player_occlusion_mask_feet_fallback():
     assert mask[250, 320] == 255  # Rising leg column past arena far edge
 
 
-def test_round_1_initialization_and_patterns():
-    engine = LavaEngine(duration_s=60.0)
+def test_feet_lock_transition_to_resting():
+    engine = LavaEngine()
     engine.start_game("P001")
-    assert engine.current_round == 1
-    assert engine.round_multiplier == 1.0
-    assert engine.round_banner_title == "ROUND 1"
-    assert engine.round_banner_timer > 0
+    assert engine.tournament_phase == TournamentPhase.WAITING_FOR_PLAYER
 
-    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9, airborne=False)
+    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9)
+    # Tick 0.2s (2 ticks of 0.1s): not locked yet
+    engine.update(pose, dt=0.1)
+    engine.update(pose, dt=0.1)
+    assert engine.tournament_phase == TournamentPhase.WAITING_FOR_PLAYER
+
+    # Tick past 0.5s requirement (4 more ticks of 0.1s -> total 0.6s >= 0.5s)
+    for _ in range(4):
+        engine.update(pose, dt=0.1)
+    assert engine.tournament_phase == TournamentPhase.RESTING
+    assert engine.current_round == 1
+    assert 7.0 <= engine.rest_timer <= 7.5
+
+
+def test_resting_countdown_to_round_1_active():
+    engine = LavaEngine()
+    engine.start_game("P001")
+    engine.tournament_phase = TournamentPhase.RESTING
+    engine.rest_timer = 7.5
+
+    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9)
+    # Step through 7.5s resting phase (76 ticks of 0.1s = 7.6s)
+    for _ in range(76):
+        engine.update(pose, dt=0.1)
+
+    assert engine.tournament_phase == TournamentPhase.ROUND_ACTIVE
+    assert engine.current_round == 1
+    assert 59.0 <= engine.round_timer <= 60.0
+
+
+def test_round_1_rivers_only_and_5s_pacing():
+    engine = LavaEngine()
+    engine.start_game("P001")
+    engine.tournament_phase = TournamentPhase.ROUND_ACTIVE
+    engine.current_round = 1
+
+    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9)
     state, wave = engine.update(pose, dt=0.01)
+
+    assert wave is not None
+    assert wave.pattern == WavePattern.RIVER
+    assert wave.total_warn == 4.0  # 4.0s warn + 1.0s erupt = 5.0s per wave
+
+
+def test_round_2_circles_only_and_4s_pacing():
+    engine = LavaEngine()
+    engine.start_game("P001")
+    engine.tournament_phase = TournamentPhase.ROUND_ACTIVE
+    engine.current_round = 2
+
+    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9)
+    state, wave = engine.update(pose, dt=0.01)
+
     assert wave is not None
     assert wave.pattern in (WavePattern.ISLAND, WavePattern.DONUT)
-    assert wave.total_warn == 3.0
+    assert wave.total_warn == 3.0  # 3.0s warn + 1.0s erupt = 4.0s per wave
 
 
-def test_round_2_transition_and_patterns():
-    engine = LavaEngine(duration_s=60.0)
+def test_round_3_bridges_only_and_3s_pacing():
+    engine = LavaEngine()
     engine.start_game("P001")
-    # Fast forward to 20.5s elapsed (time_left = 39.5s)
-    engine.state.time_left_s = 39.5
-    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9, airborne=False)
-    engine.update(pose, dt=0.01)
+    engine.tournament_phase = TournamentPhase.ROUND_ACTIVE
+    engine.current_round = 3
 
-    assert engine.current_round == 2
-    assert engine.round_multiplier == 1.5
-    assert engine.round_banner_title == "ROUND 2"
-
-    # Spawn new wave in Round 2
-    engine.wave = None
+    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9)
     state, wave = engine.update(pose, dt=0.01)
+
     assert wave is not None
-    # Round 2 only allows random geometric shapes (no circles)
-    assert wave.pattern in (WavePattern.RIVER, WavePattern.CLUSTER)
-    assert wave.total_warn == 2.0
+    assert wave.pattern == WavePattern.BRIDGES
+    assert wave.total_warn == 2.0  # 2.0s warn + 1.0s erupt = 3.0s per wave
 
 
-def test_round_3_final_round_transition_and_scoring():
-    engine = LavaEngine(duration_s=60.0)
+def test_streak_multipliers_and_hit_penalties():
+    # Multiplier tiers
+    assert get_streak_multiplier(0) == 1.0
+    assert get_streak_multiplier(2) == 1.0
+    assert get_streak_multiplier(3) == 1.2
+    assert get_streak_multiplier(5) == 1.2
+    assert get_streak_multiplier(6) == 1.5
+    assert get_streak_multiplier(8) == 1.5
+    assert get_streak_multiplier(9) == 2.0
+    assert get_streak_multiplier(12) == 2.0
+
+    engine = LavaEngine()
     engine.start_game("P001")
-    # Fast forward to 40.5s elapsed (time_left = 19.5s)
-    engine.state.time_left_s = 19.5
-    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9, airborne=False)
-    engine.update(pose, dt=0.01)
+    engine.tournament_phase = TournamentPhase.ROUND_ACTIVE
+    engine.state.score = 20
+    engine.state.streak = 5
 
-    assert engine.current_round == 3
-    assert engine.round_multiplier == 2.0
-    assert engine.round_banner_title == "FINAL ROUND"
-
-    # Verify score scaling by round multiplier
+    # Simulate Hit (Burnt): -2 penalty, score cannot go below 0, streak reset
     mask = [[True] * GRID_SIZE for _ in range(GRID_SIZE)]
-    # Make center safe
-    for c in range(3, 7):
-        for r in range(3, 7):
-            mask[c][r] = False
-
     wave = LavaWave(
-        pattern=WavePattern.ISLAND,
+        pattern=WavePattern.RIVER,
         timer=0.05,
-        total_warn=1.5,
+        total_warn=4.0,
         target_mask=mask,
         heat=[[0.0] * GRID_SIZE for _ in range(GRID_SIZE)],
     )
     engine.wave = wave
 
-    # Standing safe in center during eruption
-    state, active_wave = engine.update(pose, dt=0.1)
-    assert state.dodges == 1
-    # Base score gain 10 * streak_mult (1.0) * round_mult (2.0) = 20
-    assert state.score == 20
+    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9, airborne=False)
+    engine.update(pose, dt=0.1)
+
+    assert engine.state.hits == 1
+    assert engine.state.score == 18  # 20 - 2 = 18
+    assert engine.state.streak == 0
+    assert "BURNT" in engine.last_banner_msg
+
+    # Test score floor at 0
+    engine.state.score = 1
+    wave.judged = False
+    wave.timer = 0.05
+    engine.update(pose, dt=0.1)
+    assert engine.state.score == 0  # clamped at 0
+
+
+def test_intermission_transitions_between_rounds():
+    engine = LavaEngine()
+    engine.start_game("P001")
+    engine.tournament_phase = TournamentPhase.ROUND_ACTIVE
+    engine.current_round = 1
+    engine.round_timer = 0.05
+
+    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9)
+    # Tick past end of Round 1
+    engine.update(pose, dt=0.1)
+
+    assert engine.current_round == 2
+    assert engine.tournament_phase == TournamentPhase.RESTING
+    assert engine.rest_timer == 7.5
+
 
 
 def test_round_default_duration_and_stage_splits():
@@ -257,6 +330,7 @@ def test_round_default_duration_and_stage_splits():
     # 1. Default initialization
     engine = LavaEngine()
     assert engine.duration_s == 60.0
+    assert engine.round_duration_s == 60.0
     assert engine.state.time_left_s == 60.0
 
     # 2. Start / restart resets to 60.0s
@@ -265,33 +339,39 @@ def test_round_default_duration_and_stage_splits():
     assert engine.state.time_left_s == 60.0
     assert engine.current_round == 1
     assert engine.round_multiplier == 1.0
+    assert engine.tournament_phase == TournamentPhase.WAITING_FOR_PLAYER
 
     pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9, airborne=False)
 
-    # 3. Round 1 Warmup: 60s -> 40s (e.g. at 50s left)
-    engine.state.time_left_s = 50.0
-    state, _ = engine.update(pose, dt=0.01)
+    # 3. Round 1 Active countdown starts from 60.0s
+    engine.tournament_phase = TournamentPhase.ROUND_ACTIVE
+    engine.round_timer = 60.0
+    state, _ = engine.update(pose, dt=0.1)
+    assert 59.8 <= state.time_left_s <= 60.0
     assert engine.current_round == 1
     assert engine.round_multiplier == 1.0
     assert state.phase == Phase.PLAYING
 
-    # 4. Round 2 Chaos Shapes: 40s -> 20s (e.g. at 30s left)
-    engine.state.time_left_s = 30.0
-    state, _ = engine.update(pose, dt=0.01)
+    # 4. Round 1 expiration transitions to Round 2 Resting
+    engine.round_timer = 0.05
+    state, _ = engine.update(pose, dt=0.1)
     assert engine.current_round == 2
-    assert engine.round_multiplier == 1.5
+    assert engine.tournament_phase == TournamentPhase.RESTING
     assert state.phase == Phase.PLAYING
 
-    # 5. Final Round Sudden Surge: 20s -> 0s (e.g. at 10s left)
-    engine.state.time_left_s = 10.0
-    state, _ = engine.update(pose, dt=0.01)
+    # 5. Round 2 expiration transitions to Round 3 Resting
+    engine.tournament_phase = TournamentPhase.ROUND_ACTIVE
+    engine.round_timer = 0.05
+    state, _ = engine.update(pose, dt=0.1)
     assert engine.current_round == 3
-    assert engine.round_multiplier == 2.0
+    assert engine.tournament_phase == TournamentPhase.RESTING
     assert state.phase == Phase.PLAYING
 
-    # 6. Expiry at 0s transitions to Phase.RESULT
-    engine.state.time_left_s = 0.05
+    # 6. Final Round expiration transitions to TournamentPhase.COMPLETED and Phase.RESULT
+    engine.tournament_phase = TournamentPhase.ROUND_ACTIVE
+    engine.round_timer = 0.05
     state, wave = engine.update(pose, dt=0.1)
+    assert engine.tournament_phase == TournamentPhase.COMPLETED
     assert state.phase == Phase.RESULT
     assert state.time_left_s == 0.0
     assert wave is None

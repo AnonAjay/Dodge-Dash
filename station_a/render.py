@@ -23,7 +23,7 @@ import pygame
 
 from pose_core.floor_map import FloorMapper
 from shared.contracts import GameState, Phase, PoseFrame
-from station_a.logic import GRID_SIZE, LavaWave
+from station_a.logic import GRID_SIZE, LavaWave, get_streak_multiplier
 
 # Base Window Geometry
 DEFAULT_WIDTH = 1024
@@ -853,6 +853,7 @@ class LavaArenaRenderer:
              round_timer: float = 0.0,
              current_round: int = 1,
              round_multiplier: float = 1.0,
+             is_resting: bool = False,
              fps: float = 60.0) -> None:
         """Render complete AR frame scaled dynamically to the maximized window size."""
         now = time.time() - self.start_time
@@ -921,20 +922,31 @@ class LavaArenaRenderer:
         title_surf = render_pixel_text("FLOOR IS LAVA", scale=3, top_color=(255, 224, 51), bottom_color=(232, 56, 24))
         self.screen.blit(title_surf, (20, 10))
 
-        # Subtitle: TITANS' ARCADE | ROUND 1/3 | MULT x1.0 in neon cyan/mint
-        badge_str = f"TITANS' ARCADE | ROUND {current_round}/3 | MULT X{round_multiplier:.1f}"
-        badge_surf = render_pixel_text(badge_str, scale=2, top_color=(100, 245, 220), bottom_color=(0, 195, 175), shadow_offset=2)
+        # Subtitle: Round archetype & status in retro pixel font
+        if is_resting:
+            round_label = f"ROUND {current_round}/3" if current_round < 3 else "FINAL ROUND"
+            badge_str = f"TITANS' ARCADE | {round_label} (RESTING) | PREPARE"
+            badge_top, badge_bot = (0, 240, 255), (0, 180, 210)
+        elif current_round == 1:
+            badge_str = "TITANS' ARCADE | ROUND 1/3 (RIVERS) | 5S PACING"
+            badge_top, badge_bot = (100, 245, 220), (0, 195, 175)
+        elif current_round == 2:
+            badge_str = "TITANS' ARCADE | ROUND 2/3 (CIRCLES) | 4S PACING"
+            badge_top, badge_bot = (255, 220, 100), (235, 140, 40)
+        else:
+            badge_str = "TITANS' ARCADE | FINAL ROUND (BRIDGES) | 3S PACING"
+            badge_top, badge_bot = (255, 120, 120), (230, 50, 50)
+        badge_surf = render_pixel_text(badge_str, scale=2, top_color=badge_top, bottom_color=badge_bot, shadow_offset=2)
         self.screen.blit(badge_surf, (20, 46))
 
         # Top-Center: SCORE: 0000 in two-tone gold/orange pixel font
-        streak_mult = min(2.0, 1.0 + (state.streak // 5) * 0.1)
-        total_mult = streak_mult * round_multiplier
         score_surf = render_pixel_text(f"SCORE: {state.score:04d}", scale=3, top_color=(255, 224, 51), bottom_color=(255, 140, 20))
         score_x = max(title_surf.get_width() + 35, win_w // 2 - score_surf.get_width() // 2)
         self.screen.blit(score_surf, (score_x, 10))
 
-        # Streak & Dodges info strip
-        streak_str = f"STREAK: {state.streak}  |  DODGES: {state.dodges}  |  TOTAL: X{total_mult:.1f}"
+        # Streak, Dodges & Hits info strip
+        mult = get_streak_multiplier(state.streak)
+        streak_str = f"STREAK: {state.streak} (X{mult:.1f})  |  DODGES: {state.dodges}  |  HITS: {state.hits}"
         streak_top = (255, 220, 100) if state.streak > 0 else (170, 185, 210)
         streak_bot = (235, 140, 40) if state.streak > 0 else (120, 135, 160)
         streak_surf = render_pixel_text(streak_str, scale=2, top_color=streak_top, bottom_color=streak_bot, shadow_offset=2)
@@ -970,7 +982,7 @@ class LavaArenaRenderer:
         # ======================================================================
         # 3. CENTER-SCREEN STREET FIGHTER ARCADE ROUND BANNER
         # ======================================================================
-        if round_timer > 0.0 and round_title:
+        if (round_timer > 0.0 or is_resting) and round_title:
             cy = win_h // 2
             band_h = 140
             band_surface = pygame.Surface((win_w, band_h), pygame.SRCALPHA)
