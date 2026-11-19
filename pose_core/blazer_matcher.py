@@ -39,8 +39,8 @@ from pose_core.pose_matcher import (
 from pose_core.skeleton import BONES
 
 # Default tolerances and thresholds
-DEFAULT_PASS_THRESHOLD_PCT = 75.0
-DEFAULT_ANGLE_TOLERANCE_DEG = 25.0
+DEFAULT_PASS_THRESHOLD_PCT = 65.0  # Pass gate: 3 greens + 3 yellows easily clears (>= 65%)
+DEFAULT_ANGLE_TOLERANCE_DEG = 35.0  # Generous arcade margin (+/- 35 degrees)
 KEY_JOINT_WEIGHT_MULTIPLIER = 2.5
 STANDARD_JOINT_WEIGHT = 1.0
 
@@ -52,6 +52,16 @@ CORE_JOINTS = (
     "right_elbow",
     "left_hip",
     "right_hip",
+    "left_knee",
+    "right_knee",
+)
+
+# 6 Major limb joints (shoulders, elbows, knees) - excludes ambiguous hip angles
+LIMB_6_JOINTS = (
+    "left_shoulder",
+    "right_shoulder",
+    "left_elbow",
+    "right_elbow",
     "left_knee",
     "right_knee",
 )
@@ -116,6 +126,8 @@ def evaluate_blazer_pose(
     mirrored: bool | None = None,
     pass_threshold_pct: float = DEFAULT_PASS_THRESHOLD_PCT,
     angle_tolerance_deg: float = DEFAULT_ANGLE_TOLERANCE_DEG,
+    active_joints: Sequence[str] | None = None,
+    check_head: bool = True,
 ) -> BlazerMatchResult:
     """Compare a player's live pose against a target BlazerPoseTemplate.
 
@@ -127,6 +139,8 @@ def evaluate_blazer_pose(
         mirrored: Mirroring convention. If True, screen-left = player physical left.
         pass_threshold_pct: Minimum percentage (e.g. 75.0) required to consider matched.
         angle_tolerance_deg: Angular margin of error per joint (default +/- 25 degrees).
+        active_joints: Optional subset of joints to evaluate (e.g. LIMB_6_JOINTS). Defaults to CORE_JOINTS.
+        check_head: Whether to enforce head alignment inside the target bounding box.
 
     Returns:
         BlazerMatchResult with scores, colors, pass/fail status, and directional hints.
@@ -148,7 +162,7 @@ def evaluate_blazer_pose(
     # Check Head Alignment in the pre-defined target standing box
     # Lateral center = 0.50 +/- 0.09; Vertical range = 0.10 .. 0.40
     head_aligned = True
-    if player_head_norm is not None:
+    if check_head and player_head_norm is not None:
         hx, hy = player_head_norm
         head_aligned = (abs(hx - 0.50) <= 0.09) and (0.10 <= hy <= 0.42)
 
@@ -165,7 +179,8 @@ def evaluate_blazer_pose(
     worst_diff = 0.0
     worst_is_key = False
 
-    for joint in CORE_JOINTS:
+    eval_joints = active_joints if active_joints is not None else CORE_JOINTS
+    for joint in eval_joints:
         if joint not in target_angles:
             continue
 
@@ -187,21 +202,28 @@ def evaluate_blazer_pose(
         diff = abs(act_val - tgt_val)
         joint_diffs[joint] = round(diff, 1)
 
-        # Linear decay score: 100% at diff=0 -> 0% at diff=tolerance
-        score = max(0.0, 100.0 - (diff / angle_tolerance_deg) * 100.0)
-        joint_scores[joint] = round(score, 1)
+        # Tiered Traffic-Light Scoring:
+        # Green (diff <= green_limit, ~22 deg): 100 -> 85 pts (Direct Hit)
+        # Yellow (green_limit < diff <= yellow_limit, ~42 deg): 85 -> 60 pts (Arcade Margin)
+        # Red (diff > yellow_limit): 40 -> 0 pts (Miss)
+        green_limit = angle_tolerance_deg * (22.0 / 35.0)
+        yellow_limit = angle_tolerance_deg * (42.0 / 35.0)
 
-        # Color coding: Green within 18 deg, Amber within 32 deg, Red beyond
-        if diff <= (angle_tolerance_deg * 0.72):
+        if diff <= green_limit:
+            score = 100.0 - (diff / max(1.0, green_limit)) * 15.0
             status = "matched"
             col = C_NEON_GREEN_BGR
-        elif diff <= (angle_tolerance_deg * 1.30):
+        elif diff <= yellow_limit:
+            frac = (diff - green_limit) / max(1.0, yellow_limit - green_limit)
+            score = 85.0 - frac * 25.0
             status = "close"
             col = C_AMBER_YELLOW_BGR
         else:
+            score = max(0.0, 40.0 - (diff - yellow_limit) * 2.0)
             status = "off"
             col = C_ALERT_RED_BGR
 
+        joint_scores[joint] = round(score, 1)
         joint_status[joint] = status
         joint_colors[joint] = col
 
@@ -224,16 +246,21 @@ def evaluate_blazer_pose(
     else:
         match_pct = 0.0
 
-    # Clean match condition: match score >= threshold AND head aligned
-    is_matched = (match_pct >= pass_threshold_pct) and head_aligned
+    # Pass condition: score >= pass_threshold_pct AND at most 1 red joint AND head aligned (if checked)
+    num_reds = sum(1 for s in joint_status.values() if s == "off")
+    is_matched = (
+        (match_pct >= pass_threshold_pct)
+        and (num_reds <= 1)
+        and (head_aligned if check_head else True)
+    )
 
     # Generate actionable directional hint
     primary_hint = _generate_hint(
         worst_joint,
         player_angles.get(worst_joint) if worst_joint else None,
         target_angles.get(worst_joint) if worst_joint else None,
-        head_aligned,
-        player_head_norm,
+        head_aligned if check_head else True,
+        player_head_norm if check_head else None,
     )
 
     return BlazerMatchResult(

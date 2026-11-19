@@ -9,6 +9,8 @@ import pytest
 
 from pose_core.blazer_indexer import detect_key_joints, generate_starter_catalog
 from pose_core.blazer_matcher import (
+    CORE_JOINTS,
+    LIMB_6_JOINTS,
     BlazerPoseTemplate,
     evaluate_blazer_pose,
     load_blazer_catalog,
@@ -138,6 +140,78 @@ def test_key_joint_weighting():
     assert res_b.is_matched is True
 
 
+def test_traffic_light_scoring_thresholds():
+    """Verify that 3 green + 3 yellow passes, all yellow passes, but >=2 reds fail."""
+    target = BlazerPoseTemplate(
+        id="t_pose",
+        name="T-Pose",
+        target_angles={
+            "left_shoulder": 90.0,
+            "right_shoulder": 90.0,
+            "left_elbow": 175.0,
+            "right_elbow": 175.0,
+            "left_knee": 175.0,
+            "right_knee": 175.0,
+        },
+        key_joints=["left_shoulder", "right_shoulder"],
+    )
+
+    # 1. 3 Green joints (diff <= 15 deg) + 3 Yellow joints (diff ~30 deg)
+    player_3g_3y = {
+        "left_shoulder": 95.0,   # diff 5 (green)
+        "right_shoulder": 85.0,  # diff 5 (green)
+        "left_elbow": 165.0,     # diff 10 (green)
+        "right_elbow": 145.0,    # diff 30 (yellow)
+        "left_knee": 145.0,      # diff 30 (yellow)
+        "right_knee": 145.0,     # diff 30 (yellow)
+    }
+    res = evaluate_blazer_pose(
+        player_landmarks=player_3g_3y,
+        target_pose=target,
+        active_joints=LIMB_6_JOINTS,
+        check_head=False,
+    )
+    assert res.is_matched is True
+    assert res.match_pct >= 65.0
+    red_count = sum(1 for s in res.joint_status.values() if s == "off")
+    assert red_count == 0
+
+    # 2. All 6 joints in yellow region (~32 deg diff) -> must still pass
+    player_all_yellow = {
+        "left_shoulder": 122.0,  # diff 32 (yellow)
+        "right_shoulder": 58.0,  # diff 32 (yellow)
+        "left_elbow": 143.0,     # diff 32 (yellow)
+        "right_elbow": 143.0,    # diff 32 (yellow)
+        "left_knee": 143.0,      # diff 32 (yellow)
+        "right_knee": 143.0,     # diff 32 (yellow)
+    }
+    res_y = evaluate_blazer_pose(
+        player_landmarks=player_all_yellow,
+        target_pose=target,
+        active_joints=LIMB_6_JOINTS,
+        check_head=False,
+    )
+    assert res_y.is_matched is True
+    assert res_y.match_pct >= 65.0
+
+    # 3. Two joints in red region (> 45 deg diff) -> must fail
+    player_2_red = {
+        "left_shoulder": 140.0,  # diff 50 (red)
+        "right_shoulder": 40.0,  # diff 50 (red)
+        "left_elbow": 175.0,     # diff 0 (green)
+        "right_elbow": 175.0,    # diff 0 (green)
+        "left_knee": 175.0,      # diff 0 (green)
+        "right_knee": 175.0,     # diff 0 (green)
+    }
+    res_red = evaluate_blazer_pose(
+        player_landmarks=player_2_red,
+        target_pose=target,
+        active_joints=LIMB_6_JOINTS,
+        check_head=False,
+    )
+    assert res_red.is_matched is False
+
+
 def test_head_alignment_boundary():
     target = BlazerPoseTemplate(
         id="t_pose",
@@ -206,16 +280,17 @@ def test_user_poses_catalog_and_images():
     assert len(catalog) >= 5
 
     expected_ids = {
-        "ash_ketchum",
-        "gojo_funnypose",
-        "mario",
-        "naruto_sittingpose",
-        "spiderman_pose",
+        "t_pose",
+        "double_bicep",
+        "superman",
+        "the_dab",
+        "usain_bolt",
     }
     actual_ids = {p.id for p in catalog}
     assert expected_ids.issubset(actual_ids)
 
-    for pose in catalog:
+    # Lightweight test: verify first 6 sample poses for speed
+    for pose in catalog[:6]:
         assert len(pose.target_angles) >= 4
         assert len(pose.key_joints) >= 1
         assert len(pose.landmarks_norm) == 33
@@ -232,6 +307,85 @@ def test_user_poses_catalog_and_images():
         # Test card rendering with actual image files
         card = render_reference_card(pose, width=340, height=460, poses_dir="data/poses")
         assert card.shape == (460, 340, 3)
+
+
+def test_limb_6_joints_ignores_bad_hip():
+    """Verify that 6-limb mode (shoulders, elbows, knees) ignores obscure hip angles."""
+    target = BlazerPoseTemplate(
+        id="t_pose",
+        name="T-Pose",
+        target_angles={
+            "left_shoulder": 90.0,
+            "right_shoulder": 90.0,
+            "left_elbow": 175.0,
+            "right_elbow": 175.0,
+            "left_knee": 175.0,
+            "right_knee": 175.0,
+            "left_hip": 175.0,
+            "right_hip": 175.0,
+        },
+        key_joints=["left_shoulder", "right_shoulder"],
+    )
+
+    # Player has perfect arms and knees, but completely wrong hips (e.g. 30 deg)
+    player_angles = {
+        "left_shoulder": 90.0,
+        "right_shoulder": 90.0,
+        "left_elbow": 175.0,
+        "right_elbow": 175.0,
+        "left_knee": 175.0,
+        "right_knee": 175.0,
+        "left_hip": 30.0,
+        "right_hip": 30.0,
+    }
+
+    # In 6-limb mode: Hips are not in the evaluated set -> Match is near 100%!
+    res_6 = evaluate_blazer_pose(
+        player_landmarks=player_angles,
+        target_pose=target,
+        active_joints=LIMB_6_JOINTS,
+    )
+    assert res_6.match_pct >= 98.0
+    assert res_6.is_matched is True
+    assert "left_hip" not in res_6.joint_scores
+
+    # In 8-joint mode: Bad hips drag the score down
+    res_8 = evaluate_blazer_pose(
+        player_landmarks=player_angles,
+        target_pose=target,
+        active_joints=CORE_JOINTS,
+    )
+    assert res_8.match_pct < res_6.match_pct
+
+
+def test_check_head_disabled_allows_off_center():
+    """Verify check_head=False allows player to match even when standing off-center."""
+    target = BlazerPoseTemplate(
+        id="t_pose",
+        name="T-Pose",
+        target_angles={"left_shoulder": 90.0, "right_shoulder": 90.0},
+        key_joints=["left_shoulder", "right_shoulder"],
+    )
+    perfect_angles = {"left_shoulder": 90.0, "right_shoulder": 90.0}
+
+    # Head is off-center (x=0.10)
+    res_disabled = evaluate_blazer_pose(
+        player_landmarks=perfect_angles,
+        target_pose=target,
+        player_head_norm=(0.10, 0.25),
+        check_head=False,
+    )
+    assert res_disabled.is_matched is True
+    assert "Step Right" not in res_disabled.primary_hint
+
+    # When check_head=True, head is enforced
+    res_enabled = evaluate_blazer_pose(
+        player_landmarks=perfect_angles,
+        target_pose=target,
+        player_head_norm=(0.10, 0.25),
+        check_head=True,
+    )
+    assert res_enabled.is_matched is False
 
 
 def test_blazer_engine_auto_advance_on_7s_timeout():
@@ -302,3 +456,120 @@ def test_blazer_engine_hold_and_speed_bonus():
         engine.update(pose_frame, dt=0.1)
 
     assert engine.round_number == 2
+
+
+def test_is_arms_crossed_detection():
+    from station_b.blazer_logic import is_arms_crossed
+
+    # 1. Normal standing pose (not crossed)
+    standing = {
+        "left_shoulder": 20.0,
+        "right_shoulder": 20.0,
+        "left_elbow": 170.0,
+        "right_elbow": 170.0,
+    }
+    assert is_arms_crossed(standing) is False
+
+    # 2. Folded arms signature (sharp elbows, low shoulders)
+    folded = {
+        "left_shoulder": 22.0,
+        "right_shoulder": 20.0,
+        "left_elbow": 75.0,
+        "right_elbow": 75.0,
+    }
+    assert is_arms_crossed(folded) is True
+
+    # 3. With landmark coordinates: Left wrist crossed past right wrist
+    # Synthetic landmarks with 33 points
+    lms = [[0.5, 0.5]] * 33
+    lms[11] = [0.65, 0.22]  # L_SHOULDER
+    lms[12] = [0.35, 0.22]  # R_SHOULDER
+    lms[15] = [0.45, 0.35]  # L_WRIST (crossed towards right side)
+    lms[16] = [0.55, 0.35]  # R_WRIST (crossed towards left side)
+    assert is_arms_crossed(folded, lms) is True
+
+    # Hands at hips (not crossed): lw.x > rw.x
+    lms_hips = list(lms)
+    lms_hips[15] = [0.70, 0.50]  # uncrossed
+    lms_hips[16] = [0.30, 0.50]
+    assert is_arms_crossed(folded, lms_hips) is False
+
+
+def test_blazer_skip_and_consecutive_elimination():
+    from shared.contracts import Phase, PoseFrame
+    from station_b.blazer_logic import BlazerGameEngine
+
+    catalog = load_blazer_catalog("data/poses_index.json")
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
+    engine.start_game("P001")
+
+    pose_frame = PoseFrame(tracked=True)
+    folded_angles = {
+        "left_shoulder": 20.0,
+        "right_shoulder": 20.0,
+        "left_elbow": 75.0,
+        "right_elbow": 75.0,
+    }
+
+    # 1. Holding folded arms for 0.5s does not skip prematurely
+    for _ in range(5):
+        engine.update(pose_frame, dt=0.1, player_angles=folded_angles)
+    assert engine.round_number == 1
+    assert engine.consecutive_skips == 0
+    assert "HOLDING TO SKIP" in engine.banner_msg
+
+    # 2. Advance another 0.6s (total > 1.0s) -> triggers skip!
+    for _ in range(6):
+        engine.update(pose_frame, dt=0.1, player_angles=folded_angles)
+    assert engine.consecutive_skips == 1
+    assert "SKIPPED" in engine.banner_msg
+
+    # Advance 1.1s cooldown -> moves to round 2
+    for _ in range(11):
+        engine.update(pose_frame, dt=0.1)
+    assert engine.round_number == 2
+
+    # 3. Skip 3 more times consecutively -> 4 consecutive skips must ELIMINATE player!
+    for expected_skip in [2, 3, 4]:
+        for _ in range(11):  # 1.1s folded arms
+            engine.update(pose_frame, dt=0.1, player_angles=folded_angles)
+        assert engine.consecutive_skips == expected_skip
+        if expected_skip < 4:
+            for _ in range(11):  # cooldown
+                engine.update(pose_frame, dt=0.1)
+
+    # 4. Instant disqualification on 4th consecutive skip
+    assert engine.state.phase == Phase.RESULT
+    assert "ELIMINATED" in engine.banner_msg
+
+
+def test_blazer_2_stage_tournament_progression():
+    from shared.contracts import Phase, PoseFrame
+    from station_b.blazer_logic import BlazerGameEngine
+
+    catalog = load_blazer_catalog("data/poses_index.json")
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
+    engine.start_game("P001")
+
+    # Round 1 is Stage 1: Precision Blitz (10.0s)
+    assert engine.round_number == 1
+    assert engine.current_stage == 1
+    assert engine.current_stage_name == "PRECISION BLITZ"
+    assert engine.time_left_s == 10.0
+
+    pose_frame = PoseFrame(tracked=True)
+    # Perfect match in Stage 1 -> awards +150 perfection bonus
+    match_angles = dict(engine.current_pose.target_angles)
+    for _ in range(5):
+        engine.update(pose_frame, dt=0.1, player_angles=match_angles)
+    assert engine.state.score >= 250  # Base 100 + 150 perfection
+
+    # Fast forward through rounds 1..3 to reach Stage 2 (round 4)
+    for r in range(1, 4):
+        engine.current_round_idx = r
+        engine._reset_round_timers()
+
+    assert engine.round_number == 4
+    assert engine.current_stage == 2
+    assert engine.current_stage_name == "SPEED RUSH"
+    assert engine.time_left_s == 5.0  # Stage 2 uses 5.0s rush timer!

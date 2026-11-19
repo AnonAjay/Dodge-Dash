@@ -1,15 +1,14 @@
-"""Station B (Wall Shape) Pygame + OpenCV AR Renderer.
+"""Station B (Pose Blazer Tournament) Pygame + OpenCV AR Renderer.
 Draws:
-- Live mirrored camera feed or dark virtual studio stage.
-- Perspective calibrated floor grid and center "STAND HERE" target circle.
-- 3D oncoming wall with dynamic scale and cutout body silhouette.
-- Impact explosions / color flashes: Neon Green on pass, Crimson Red on smash.
-- Color-coded player skeleton: Green bones for matched joints, Red/Amber for adjustments.
-- Real-time pose angle HUD and directional feedback hints.
+- Split-screen HD layout (380x520 reference card on left, live player AR feed on right).
+- 2-Stage tournament HUD (Precision Blitz vs Speed Rush).
+- Neon color-coded bones for 6 core limbs (green <= 22 deg, yellow <= 42 deg, red > 42 deg).
+- Real-time joint angle telemetry panel (YOU vs TGT).
+- Match gauge, hold timer progress, and skip feedback.
+- Tournament Result summary screen with score and streak statistics.
 """
 from __future__ import annotations
 
-import math
 import time
 from typing import Any, Sequence
 
@@ -17,107 +16,52 @@ import cv2
 import numpy as np
 import pygame
 
-from pose_core.floor_map import FloorMapper
-from pose_core.pose_matcher import (
-    DEFAULT_TEMPLATES,
-    JointComparison,
-    PoseMatchResult,
-    PoseTemplate,
-    extract_pose_angles,
+from pose_core.blazer_matcher import (
+    C_ALERT_RED_BGR,
+    C_AMBER_YELLOW_BGR,
+    C_DARK_BG_BGR,
+    C_NEON_CYAN_BGR,
+    C_NEON_GREEN_BGR,
+    BlazerMatchResult,
+    BlazerPoseTemplate,
+    render_reference_card,
 )
 from shared.contracts import GameState, Phase, PoseFrame
-from station_b.logic import Wall, WallState
+from station_b.logic import BlazerGameEngine
 
 # Canvas dimensions
 HUD_TOP_H = 64
 HUD_BOT_H = 46
 
-# Colors (BGR for cv2, RGB for pygame)
-C_PASS_BGR = (100, 240, 50)
-C_FAIL_BGR = (50, 50, 240)
-C_WARN_BGR = (30, 180, 255)
-C_WALL_BLUE_BGR = (220, 120, 30)
-C_WALL_NAVY_BGR = (120, 30, 15)
-C_WALL_BLACK_BGR = (20, 20, 25)
-C_CYAN_BGR = (255, 230, 0)
-
+# Colors
 TEXT_GOLD = (255, 204, 0)
 TEXT_WHITE = (245, 248, 255)
 TEXT_MUTED = (140, 148, 165)
 SAFE_GREEN = (0, 255, 120)
 
-CORE_BONES = [
-    (11, 12),           # Shoulders
-    (11, 13), (13, 15), # Left Arm
-    (12, 14), (14, 16), # Right Arm
-    (11, 23), (12, 24), # Torso sides
-    (23, 24),           # Hips
-    (23, 25), (25, 27), # Left Leg
-    (24, 26), (26, 28), # Right Leg
-]
 
+class BlazerArenaRenderer:
+    """HD Tournament Renderer for Pose Blazer (Station B)."""
 
-def make_template_ref_posture(template_id: str) -> list[tuple[float, float, float]]:
-    """Return 33 normalized reference coordinates for target wall silhouettes."""
-    pts = [(0.0, 0.0, 0.0)] * 33
-    pts[0] = (0.50, 0.22, 0.0)  # Head
-
-    # Torso
-    pts[11] = (0.42, 0.36, 0.0)  # L_SHOULDER
-    pts[12] = (0.58, 0.36, 0.0)  # R_SHOULDER
-    pts[23] = (0.44, 0.58, 0.0)  # L_HIP
-    pts[24] = (0.56, 0.58, 0.0)  # R_HIP
-
-    # Default standing legs
-    pts[25] = (0.44, 0.76, 0.0)  # L_KNEE
-    pts[26] = (0.56, 0.76, 0.0)  # R_KNEE
-    pts[27] = (0.44, 0.94, 0.0)  # L_ANKLE
-    pts[28] = (0.56, 0.94, 0.0)  # R_ANKLE
-
-    tid = template_id.lower()
-    if tid == "t_pose":
-        pts[13] = (0.28, 0.36, 0.0); pts[15] = (0.14, 0.36, 0.0)
-        pts[14] = (0.72, 0.36, 0.0); pts[16] = (0.86, 0.36, 0.0)
-    elif tid == "star":
-        pts[13] = (0.30, 0.24, 0.0); pts[15] = (0.20, 0.14, 0.0)
-        pts[14] = (0.70, 0.24, 0.0); pts[16] = (0.80, 0.14, 0.0)
-        pts[25] = (0.38, 0.76, 0.0); pts[27] = (0.32, 0.94, 0.0)
-        pts[26] = (0.62, 0.76, 0.0); pts[28] = (0.68, 0.94, 0.0)
-    elif tid == "cactus":
-        pts[13] = (0.28, 0.36, 0.0); pts[15] = (0.28, 0.20, 0.0)
-        pts[14] = (0.72, 0.36, 0.0); pts[16] = (0.72, 0.20, 0.0)
-    elif tid == "disco_right":
-        pts[14] = (0.68, 0.24, 0.0); pts[16] = (0.80, 0.12, 0.0)
-        pts[13] = (0.38, 0.50, 0.0); pts[15] = (0.34, 0.64, 0.0)
-    elif tid == "disco_left":
-        pts[13] = (0.32, 0.24, 0.0); pts[15] = (0.20, 0.12, 0.0)
-        pts[14] = (0.62, 0.50, 0.0); pts[16] = (0.66, 0.64, 0.0)
-    elif tid == "squat":
-        pts[11] = (0.42, 0.44, 0.0); pts[12] = (0.58, 0.44, 0.0)
-        pts[23] = (0.44, 0.64, 0.0); pts[24] = (0.56, 0.64, 0.0)
-        pts[25] = (0.36, 0.76, 0.0); pts[27] = (0.44, 0.92, 0.0)
-        pts[26] = (0.64, 0.76, 0.0); pts[28] = (0.56, 0.92, 0.0)
-        pts[13] = (0.30, 0.46, 0.0); pts[15] = (0.16, 0.46, 0.0)
-        pts[14] = (0.70, 0.46, 0.0); pts[16] = (0.84, 0.46, 0.0)
-    else:
-        # Default T-Pose
-        pts[13] = (0.28, 0.36, 0.0); pts[15] = (0.14, 0.36, 0.0)
-        pts[14] = (0.72, 0.36, 0.0); pts[16] = (0.86, 0.36, 0.0)
-
-    return pts
-
-
-class WallArenaRenderer:
-    """Renders the 3D perspective wall game with live webcam AR integration."""
-
-    def __init__(self, mapper: FloorMapper | None = None, fullscreen: bool = False):
-        self.mapper = mapper
+    def __init__(
+        self,
+        width: int = 1280,
+        height: int = 720,
+        fullscreen: bool = False,
+        poses_dir: str = "data/poses",
+    ) -> None:
         pygame.init()
         pygame.font.init()
 
-        flags = pygame.RESIZABLE
-        self.screen = pygame.display.set_mode((1280, 720), flags)
-        pygame.display.set_caption("Station B: Wall Shape (Hole in the Wall)")
+        self.width = width
+        self.height = height
+        self.poses_dir = poses_dir
+        self.flags = pygame.DOUBLEBUF | pygame.RESIZABLE
+        if fullscreen:
+            self.flags |= pygame.FULLSCREEN
+
+        self.screen = pygame.display.set_mode((width, height), self.flags)
+        pygame.display.set_caption("Station B: Pose Blazer Tournament")
 
         self.is_maximized = False
         if fullscreen:
@@ -127,11 +71,29 @@ class WallArenaRenderer:
         self.font_large = pygame.font.SysFont("Consolas", 24, bold=True)
         self.font_mid = pygame.font.SysFont("Consolas", 18, bold=True)
         self.font_small = pygame.font.SysFont("Consolas", 14)
-        self.font_arcade_huge = pygame.font.SysFont("Impact", 60)
-        self.font_arcade_sub = pygame.font.SysFont("Impact", 26)
+        self.font_tiny = pygame.font.SysFont("Consolas", 11)
 
-        self.start_time = time.time()
-        self.last_frame_time = time.time()
+        # Bone definitions for 6 limbs
+        self.primary_limb_bones = [
+            (11, 12),           # Shoulders
+            (11, 13), (13, 15), # Right Arm (mirrored: right shoulder to wrist)
+            (12, 14), (14, 16), # Left Arm (mirrored: left shoulder to wrist)
+            (11, 23), (12, 24), # Torso sides
+            (23, 24),           # Hips
+            (23, 25), (25, 27), # Right Leg
+            (24, 26), (26, 28), # Left Leg
+        ]
+
+        self.bone_to_joint = {
+            (12, 14): "left_shoulder",
+            (14, 16): "left_elbow",
+            (11, 13): "right_shoulder",
+            (13, 15): "right_elbow",
+            (24, 26): "left_knee",
+            (26, 28): "left_knee",
+            (23, 25): "right_knee",
+            (25, 27): "right_knee",
+        }
 
     def _maximize_window(self) -> None:
         try:
@@ -156,314 +118,285 @@ class WallArenaRenderer:
         except Exception:
             pass
 
-    def _render_ar_frame(
-        self,
-        cam_frame: np.ndarray,
-        wall: Wall | None,
-        pose: PoseFrame,
-        debug: dict | None = None,
-    ) -> np.ndarray:
-        cam_h, cam_w = cam_frame.shape[:2]
-        out = cam_frame.copy()
-
-        # ----------------------------------------------------------------------
-        # 1. Predefined Head Alignment Target Box
-        # ----------------------------------------------------------------------
-        tgt_head_x = cam_w // 2
-        tgt_head_y = int(cam_h * 0.25)
-        box_w = int(cam_w * 0.18)       # ~115px wide on 640w
-        box_h = int(cam_h * 0.24)       # ~115px high on 480h
-
-        box_x1 = tgt_head_x - box_w // 2
-        box_y1 = tgt_head_y - box_h // 2
-        box_x2 = tgt_head_x + box_w // 2
-        box_y2 = tgt_head_y + box_h // 2
-
-        # Extract live player head point (MediaPipe Landmark 0: Nose / Head Center)
-        is_head_aligned = False
-        head_px = None
-        if debug and "landmarks_px" in debug and len(debug["landmarks_px"]) > 0:
-            lm0 = debug["landmarks_px"][0]
-            hx, hy = float(lm0[0]), float(lm0[1])
-            hvis = float(lm0[2]) if len(lm0) > 2 else 1.0
-            if hvis > 0.35:
-                head_px = (int(round(hx)), int(round(hy)))
-                if box_x1 <= hx <= box_x2 and box_y1 <= hy <= box_y2:
-                    is_head_aligned = True
-
-        # Dynamic Box Color: Bright Safe Green when aligned, Amber/Cyan when waiting
-        box_color = C_PASS_BGR if is_head_aligned else (0, 220, 255)
-        fill_color = (0, 80, 0) if is_head_aligned else (20, 45, 75)
-        label_text = "HEAD ALIGNED" if is_head_aligned else "ALIGN HEAD HERE"
-
-        # Translucent Box Fill
-        box_overlay = out.copy()
-        cv2.rectangle(box_overlay, (box_x1, box_y1), (box_x2, box_y2), fill_color, -1)
-        cv2.addWeighted(box_overlay, 0.35, out, 0.65, 0, out)
-
-        # Crisp Border
-        cv2.rectangle(out, (box_x1, box_y1), (box_x2, box_y2), box_color, 2, cv2.LINE_AA)
-
-        # Arcade Corner Brackets (accents)
-        c_len = 14
-        # Top-Left
-        cv2.line(out, (box_x1, box_y1), (box_x1 + c_len, box_y1), box_color, 4, cv2.LINE_AA)
-        cv2.line(out, (box_x1, box_y1), (box_x1, box_y1 + c_len), box_color, 4, cv2.LINE_AA)
-        # Top-Right
-        cv2.line(out, (box_x2, box_y1), (box_x2 - c_len, box_y1), box_color, 4, cv2.LINE_AA)
-        cv2.line(out, (box_x2, box_y1), (box_x2, box_y1 + c_len), box_color, 4, cv2.LINE_AA)
-        # Bottom-Left
-        cv2.line(out, (box_x1, box_y2), (box_x1 + c_len, box_y2), box_color, 4, cv2.LINE_AA)
-        cv2.line(out, (box_x1, box_y2), (box_x1, box_y2 - c_len), box_color, 4, cv2.LINE_AA)
-        # Bottom-Right
-        cv2.line(out, (box_x2, box_y2), (box_x2 - c_len, box_y2), box_color, 4, cv2.LINE_AA)
-        cv2.line(out, (box_x2, box_y2), (box_x2 - c_len, box_y2), box_color, 4, cv2.LINE_AA)
-
-        # Header Badge
-        (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_DUPLEX, 0.40, 1)
-        badge_w = tw + 14
-        badge_h = 20
-        cv2.rectangle(out, (box_x1, box_y1 - badge_h), (box_x1 + badge_w, box_y1), (15, 18, 25), -1)
-        cv2.rectangle(out, (box_x1, box_y1 - badge_h), (box_x1 + badge_w, box_y1), box_color, 1)
-        cv2.putText(out, label_text, (box_x1 + 7, box_y1 - 6),
-                    cv2.FONT_HERSHEY_DUPLEX, 0.40, box_color, 1, cv2.LINE_AA)
-
-        # Draw Head Reticle on Player
-        if head_px is not None:
-            cv2.circle(out, head_px, 6, box_color, -1, cv2.LINE_AA)
-            cv2.circle(out, head_px, 10, (255, 255, 255), 1, cv2.LINE_AA)
-
-        # ----------------------------------------------------------------------
-        # 2. Perspective Floor Grid and Standing Target
-        # ----------------------------------------------------------------------
-        if self.mapper is not None:
-            w_m, h_m = self.mapper.w_m, self.mapper.h_m
-            poly = np.array([self.mapper.corners_px], dtype=np.int32)
-            cv2.polylines(out, poly, True, (60, 180, 240), 2, cv2.LINE_AA)
-
-            # Center target "STAND HERE" (turns green when aligned)
-            floor_target_col = C_PASS_BGR if is_head_aligned else (0, 240, 255)
-            cx, cy = self.mapper.to_pixels(w_m / 2.0, h_m / 2.0)
-            cv2.circle(out, (int(round(cx)), int(round(cy))), 14, floor_target_col, 2, cv2.LINE_AA)
-            cv2.circle(out, (int(round(cx)), int(round(cy))), 5, floor_target_col, -1, cv2.LINE_AA)
-            cv2.putText(out, "STAND HERE", (int(round(cx)) - 42, int(round(cy)) + 24),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.36, floor_target_col, 1, cv2.LINE_AA)
-
-            # Feet contact points
-            if pose.left_foot_m:
-                lx, ly = self.mapper.to_pixels(*pose.left_foot_m)
-                cv2.circle(out, (int(round(lx)), int(round(ly))), 8, (255, 120, 0), -1, cv2.LINE_AA)
-            if pose.right_foot_m:
-                rx, ry = self.mapper.to_pixels(*pose.right_foot_m)
-                cv2.circle(out, (int(round(rx)), int(round(ry))), 8, (255, 0, 255), -1, cv2.LINE_AA)
-
-        # 3. Draw 3D Oncoming Wall with Cutout Silhouette
-        if wall is not None:
-            # Perspective scaling: starts small at far edge (y=1.8), grows as y approaches 0
-            y_m = max(-0.2, min(1.8, wall.y_m))
-            # normalized depth 0.0 (near camera) to 1.0 (far horizon)
-            depth_ratio = y_m / 1.8
-            scale = 0.35 + (1.0 - depth_ratio) * 0.65  # 0.35 -> 1.0
-
-            wall_w = int(cam_w * 0.85 * scale)
-            wall_h = int(cam_h * 0.85 * scale)
-            wx0 = (cam_w - wall_w) // 2
-            wy0 = int(cam_h * 0.08 + depth_ratio * cam_h * 0.15)
-
-            # Base Wall Color based on state
-            if wall.state == WallState.PASSED:
-                wall_border_col = C_PASS_BGR
-                slab_col = (20, 100, 30)
-            elif wall.state == WallState.HIT:
-                wall_border_col = C_FAIL_BGR
-                slab_col = (30, 20, 110)
-            else:
-                wall_border_col = C_WALL_BLUE_BGR
-                slab_col = C_WALL_NAVY_BGR
-
-            # Wall Slab Overlay (Translucent)
-            overlay = out.copy()
-            cv2.rectangle(overlay, (wx0, wy0), (wx0 + wall_w, wy0 + wall_h), slab_col, -1)
-
-            # Cutout Silhouette (Reference Wireframe Hole)
-            ref_pts = make_template_ref_posture(wall.template.id)
-            sil_w = wall_w * 0.70
-            sil_h = wall_h * 0.80
-            scx = wx0 + wall_w // 2
-            scy = wy0 + wall_h // 2
-
-            ref_px = [
-                (int(scx + (rx - 0.5) * sil_w), int(scy + (ry - 0.5) * sil_h))
-                for rx, ry, _ in ref_pts
-            ]
-
-            # Cut out hollow silhouette lines inside the slab overlay
-            for j1, j2 in CORE_BONES:
-                if j1 < len(ref_px) and j2 < len(ref_px):
-                    cv2.line(overlay, ref_px[j1], ref_px[j2], (0, 0, 0), 16, cv2.LINE_AA)
-            for px, py in ref_px:
-                cv2.circle(overlay, (px, py), 12, (0, 0, 0), -1, cv2.LINE_AA)
-
-            # Blend slab onto camera frame
-            alpha = 0.55 if wall.state == WallState.APPROACHING else 0.75
-            cv2.addWeighted(overlay, alpha, out, 1.0 - alpha, 0, out)
-
-            # Outer Wall Frame
-            cv2.rectangle(out, (wx0, wy0), (wx0 + wall_w, wy0 + wall_h), C_WALL_BLACK_BGR, 6, cv2.LINE_AA)
-            cv2.rectangle(out, (wx0, wy0), (wx0 + wall_w, wy0 + wall_h), wall_border_col, 3, cv2.LINE_AA)
-
-            # Glowing neon contour around the cutout silhouette
-            cutout_contour_col = (0, 240, 255) if wall.state == WallState.APPROACHING else wall_border_col
-            for j1, j2 in CORE_BONES:
-                if j1 < len(ref_px) and j2 < len(ref_px):
-                    cv2.line(out, ref_px[j1], ref_px[j2], cutout_contour_col, 4, cv2.LINE_AA)
-            for px, py in ref_px:
-                cv2.circle(out, (px, py), 6, cutout_contour_col, -1, cv2.LINE_AA)
-
-        # 3. Draw Player Skeleton (Color-coded bones)
-        if debug and "landmarks_px" in debug and len(debug["landmarks_px"]) >= 29:
-            lms = debug["landmarks_px"]
-            pts = [(int(round(p[0])), int(round(p[1]))) for p in lms]
-            vis = [p[2] for p in lms]
-
-            # Draw bones
-            for j1, j2 in CORE_BONES:
-                if vis[j1] > 0.3 and vis[j2] > 0.3:
-                    # Color based on whether joint is matched
-                    bone_col = (0, 255, 120)  # Safe green
-                    cv2.line(out, pts[j1], pts[j2], (0, 0, 0), 6, cv2.LINE_AA)
-                    cv2.line(out, pts[j1], pts[j2], bone_col, 3, cv2.LINE_AA)
-            for i, pt in enumerate(pts[:29]):
-                if vis[i] > 0.3:
-                    cv2.circle(out, pt, 4, (255, 255, 255), -1, cv2.LINE_AA)
-
-        return out
-
     def draw(
         self,
         state: GameState,
-        wall: Wall | None,
-        pose: PoseFrame,
+        engine: BlazerGameEngine,
         cam_frame: np.ndarray | None = None,
-        debug: dict | None = None,
-        banner_msg: str = "",
-        banner_color: tuple[int, int, int] = TEXT_GOLD,
+        debug_info: dict | None = None,
+        match_res: BlazerMatchResult | None = None,
+        player_angles: dict[str, float | None] | None = None,
+        show_skeleton_on_card: bool = False,
         fps: float = 60.0,
     ) -> None:
         win_w, win_h = self.screen.get_size()
-        self.screen.fill((16, 18, 22))
+        self.screen.fill((16, 18, 24))
 
-        # 1. Background (AR Camera Feed or Virtual Stage)
+        curr_pose = engine.current_pose
+
+        # ----------------------------------------------------------------------
+        # 1. Split Layout Calculations
+        # ----------------------------------------------------------------------
+        top_h = HUD_TOP_H
+        bot_h = HUD_BOT_H
+        play_h = win_h - top_h - bot_h
+
+        # Left Column: Reference Card (360px wide)
+        card_w = min(400, int(win_w * 0.32))
+        card_h = play_h - 20
+        card_x = 16
+        card_y = top_h + 10
+
+        # Right Column: Live Player Feed
+        cam_x = card_x + card_w + 16
+        cam_y = card_y
+        cam_w = win_w - cam_x - 16
+        cam_h = card_h
+
+        # ----------------------------------------------------------------------
+        # 2. Render Left Reference Pose Card
+        # ----------------------------------------------------------------------
+        if curr_pose:
+            card_bgr = render_reference_card(
+                curr_pose,
+                width=card_w,
+                height=card_h,
+                poses_dir=self.poses_dir,
+            )
+            card_rgb = cv2.cvtColor(card_bgr, cv2.COLOR_BGR2RGB)
+            card_surf = pygame.image.frombuffer(card_rgb.tobytes(), (card_w, card_h), "RGB")
+            self.screen.blit(card_surf, (card_x, card_y))
+
+            # Description below card header
+            if curr_pose.description:
+                desc_bg = pygame.Surface((card_w - 4, 32), pygame.SRCALPHA)
+                desc_bg.fill((10, 12, 16, 210))
+                self.screen.blit(desc_bg, (card_x + 2, card_y + card_h - 60))
+                d_txt = self.font_tiny.render(curr_pose.description[:48], True, (200, 215, 230))
+                self.screen.blit(d_txt, (card_x + 10, card_y + card_h - 52))
+
+        # ----------------------------------------------------------------------
+        # 3. Render Right Camera Feed & Player Skeleton
+        # ----------------------------------------------------------------------
+        cam_surface = pygame.Surface((cam_w, cam_h))
+        cam_surface.fill((22, 26, 36))
+
         if cam_frame is not None:
-            ar_frame = self._render_ar_frame(cam_frame, wall, pose, debug=debug)
-            rgb = cv2.cvtColor(ar_frame, cv2.COLOR_BGR2RGB)
-            h, w = rgb.shape[:2]
-            cam_surf = pygame.image.frombuffer(rgb.tobytes(), (w, h), "RGB")
-            scaled_cam = pygame.transform.scale(cam_surf, (win_w, win_h))
-            self.screen.blit(scaled_cam, (0, 0))
+            # Draw player AR canvas in OpenCV
+            ar_canvas = cv2.resize(cam_frame, (cam_w, cam_h), interpolation=cv2.INTER_LINEAR)
+            ch, cw = ar_canvas.shape[:2]
+
+            # Head Alignment Target Box
+            if engine.check_head:
+                tgt_hx = cw // 2
+                tgt_hy = int(ch * 0.26)
+                bw, bh = int(cw * 0.18), int(ch * 0.24)
+                bx1, by1 = tgt_hx - bw // 2, tgt_hy - bh // 2
+                bx2, by2 = tgt_hx + bw // 2, tgt_hy + bh // 2
+                is_head_ok = match_res.head_aligned if match_res else False
+                b_col = C_NEON_GREEN_BGR if is_head_ok else (0, 220, 255)
+                cv2.rectangle(ar_canvas, (bx1, by1), (bx2, by2), b_col, 2, cv2.LINE_AA)
+                cv2.putText(
+                    ar_canvas,
+                    "HEAD ALIGNED" if is_head_ok else "ALIGN HEAD HERE",
+                    (bx1 + 4, by1 - 8),
+                    cv2.FONT_HERSHEY_DUPLEX,
+                    0.42,
+                    b_col,
+                    1,
+                    cv2.LINE_AA,
+                )
+
+            # Draw Skeleton Bones
+            if debug_info and "landmarks_px" in debug_info and len(debug_info["landmarks_px"]) >= 29:
+                lms = debug_info["landmarks_px"]
+                orig_w = cam_frame.shape[1]
+                orig_h = cam_frame.shape[0]
+                pts = [(int(float(lm[0]) * cw / orig_w), int(float(lm[1]) * ch / orig_h)) for lm in lms]
+
+                joint_cols = match_res.joint_colors_bgr if match_res else {}
+                joint_stats = match_res.joint_status if match_res else {}
+
+                for j1, j2 in self.primary_limb_bones:
+                    if j1 < len(pts) and j2 < len(pts):
+                        p1, p2 = pts[j1], pts[j2]
+                        assoc_j = self.bone_to_joint.get((j1, j2), self.bone_to_joint.get((j2, j1)))
+                        if assoc_j and assoc_j in joint_cols:
+                            col = joint_cols[assoc_j]
+                            thick = 4 if joint_stats.get(assoc_j) == "matched" else 2
+                            cv2.line(ar_canvas, p1, p2, (20, 20, 20), thick + 2, cv2.LINE_AA)
+                            cv2.line(ar_canvas, p1, p2, col, thick, cv2.LINE_AA)
+                        else:
+                            cv2.line(ar_canvas, p1, p2, (100, 120, 140), 2, cv2.LINE_AA)
+
+                for idx in [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]:
+                    if idx < len(pts):
+                        cv2.circle(ar_canvas, pts[idx], 5, (0, 220, 255), -1, cv2.LINE_AA)
+
+            # Convert to Pygame
+            rgb_cam = cv2.cvtColor(ar_canvas, cv2.COLOR_BGR2RGB)
+            cam_feed_surf = pygame.image.frombuffer(rgb_cam.tobytes(), (cw, ch), "RGB")
+            cam_surface.blit(cam_feed_surf, (0, 0))
         else:
-            # Dark Virtual Studio Stage for Keyboard mode
-            virtual_surf = pygame.Surface((win_w, win_h))
-            virtual_surf.fill((24, 28, 36))
+            # Virtual stage grid
+            for y_line in range(0, cam_h, 30):
+                pygame.draw.line(cam_surface, (30, 36, 48), (0, y_line), (cam_w, y_line), 1)
 
-            # Floor grid lines
-            horizon_y = int(win_h * 0.35)
-            for gy in range(horizon_y, win_h, 30):
-                pygame.draw.line(virtual_surf, (40, 48, 62), (0, gy), (win_w, gy), 1)
-            for gx in range(0, win_w, 60):
-                pygame.draw.line(virtual_surf, (40, 48, 62), (win_w // 2, horizon_y), (gx, win_h), 1)
+        self.screen.blit(cam_surface, (cam_x, cam_y))
+        pygame.draw.rect(self.screen, (55, 68, 90), (cam_x, cam_y, cam_w, cam_h), 2)
 
-            # Virtual oncoming wall box
-            if wall is not None:
-                depth_ratio = max(0.0, min(1.0, wall.y_m / 1.8))
-                scale = 0.35 + (1.0 - depth_ratio) * 0.65
-                ww = int(win_w * 0.65 * scale)
-                wh = int(win_h * 0.65 * scale)
-                wx = (win_w - ww) // 2
-                wy = int(horizon_y + depth_ratio * 40)
+        # ----------------------------------------------------------------------
+        # 4. Live Joint Angle Telemetry Panel (Top-Right inside Cam Feed)
+        # ----------------------------------------------------------------------
+        eval_joints = engine.active_joints
+        target_angles = curr_pose.target_angles if curr_pose else {}
+        angles_map = player_angles or {}
 
-                w_col = (0, 220, 100) if wall.state == WallState.PASSED else ((240, 50, 50) if wall.state == WallState.HIT else (30, 120, 240))
-                pygame.draw.rect(virtual_surf, w_col, (wx, wy, ww, wh), 4)
+        panel_w = 230
+        panel_h = 24 + len(eval_joints) * 20
+        pan_x = cam_x + cam_w - panel_w - 12
+        pan_y = cam_y + 12
 
-                # Draw silhouette preview
-                ref_pts = make_template_ref_posture(wall.template.id)
-                r_px = [(int(wx + ww // 2 + (rx - 0.5) * ww * 0.7), int(wy + wh // 2 + (ry - 0.5) * wh * 0.8)) for rx, ry, _ in ref_pts]
-                for j1, j2 in CORE_BONES:
-                    if j1 < len(r_px) and j2 < len(r_px):
-                        pygame.draw.line(virtual_surf, (255, 230, 0), r_px[j1], r_px[j2], 3)
+        pan_surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        pan_surf.fill((16, 20, 28, 220))
+        self.screen.blit(pan_surf, (pan_x, pan_y))
+        pygame.draw.rect(self.screen, (60, 75, 100), (pan_x, pan_y, panel_w, panel_h), 1)
 
-            # Predefined Head Target Box in Virtual Stage
-            v_box_w = int(win_w * 0.16)
-            v_box_h = int(win_h * 0.22)
-            v_box_x = win_w // 2 - v_box_w // 2
-            v_box_y = int(horizon_y * 0.45)
+        hdr_txt = self.font_tiny.render("JOINT TELEMETRY (TGT vs YOU)", True, (0, 220, 255))
+        self.screen.blit(hdr_txt, (pan_x + 8, pan_y + 5))
 
-            fx = max(0.0, min(1.0, pose.floor_x_m / 1.8)) if pose.floor_x_m is not None else 0.5
-            is_virtual_aligned = (abs(fx - 0.5) <= 0.09)
-            v_col = (0, 255, 120) if is_virtual_aligned else (0, 220, 255)
-            pygame.draw.rect(virtual_surf, v_col, (v_box_x, v_box_y, v_box_w, v_box_h), 2)
-            v_lbl = self.font_small.render("HEAD ALIGNED" if is_virtual_aligned else "ALIGN HEAD HERE", True, v_col)
-            virtual_surf.blit(v_lbl, (v_box_x + 6, v_box_y - 18))
+        for i, j_name in enumerate(eval_joints):
+            tgt = target_angles.get(j_name)
+            act = angles_map.get(j_name)
+            row_y = pan_y + 22 + i * 19
+            j_short = j_name.replace("left_", "L_").replace("right_", "R_").upper()
 
-            # Virtual player dot
-            if pose.floor_x_m is not None and pose.floor_y_m is not None:
-                fy = max(0.0, min(1.0, pose.floor_y_m / 1.8))
-                px = int(fx * win_w)
-                py = int(horizon_y + (1.0 - fy) * (win_h - horizon_y))
-                pygame.draw.circle(virtual_surf, (0, 255, 120), (px, py), 12)
+            if tgt is not None:
+                tgt_str = f"{tgt:.0f}°"
+                if act is None:
+                    act_str = "--"
+                    col = TEXT_MUTED
+                else:
+                    diff = abs(act - tgt)
+                    act_str = f"{act:.0f}°"
+                    if diff <= 22.0:
+                        col = SAFE_GREEN
+                    elif diff <= 42.0:
+                        col = TEXT_GOLD
+                    else:
+                        col = (255, 60, 60)
+                row_str = f"{j_short:<9} TGT:{tgt_str:<4} YOU:{act_str:<4}"
+                r_txt = self.font_tiny.render(row_str, True, col)
+                self.screen.blit(r_txt, (pan_x + 8, row_y))
 
-            self.screen.blit(virtual_surf, (0, 0))
-
-        # 2. Top HUD
-        hud_surface = pygame.Surface((win_w, HUD_TOP_H), pygame.SRCALPHA)
-        hud_surface.fill((12, 14, 18, 225))
+        # ----------------------------------------------------------------------
+        # 5. Top Tournament HUD
+        # ----------------------------------------------------------------------
+        hud_surface = pygame.Surface((win_w, top_h), pygame.SRCALPHA)
+        hud_surface.fill((12, 15, 20, 235))
         self.screen.blit(hud_surface, (0, 0))
-        pygame.draw.line(self.screen, (45, 55, 75), (0, HUD_TOP_H), (win_w, HUD_TOP_H), 2)
+        pygame.draw.line(self.screen, (45, 55, 75), (0, top_h), (win_w, top_h), 2)
 
-        title = self.font_title.render("STATION B: WALL SHAPE", True, (0, 220, 255))
-        self.screen.blit(title, (24, 8))
+        # Stage Badge
+        stage_num = engine.current_stage
+        stage_title = engine.current_stage_name
+        stage_col = (0, 220, 255) if stage_num == 1 else (255, 140, 0)
+        stg_txt = self.font_title.render(f"STAGE {stage_num}: {stage_title}", True, stage_col)
+        self.screen.blit(stg_txt, (24, 8))
 
-        tmpl_name = wall.template.name.upper() if wall else "READY"
-        target_badge = self.font_small.render(f"TARGET POSE: {tmpl_name}", True, (255, 204, 0))
-        self.screen.blit(target_badge, (24, 38))
+        round_txt = self.font_small.render(f"ROUND {engine.round_number}/{engine.total_rounds} | 6-LIMB ARCADE", True, (180, 200, 220))
+        self.screen.blit(round_txt, (24, 38))
 
-        score_x = max(340, win_w // 2 - 100)
-        score_txt = self.font_large.render(f"SCORE: {state.score:04d}", True, TEXT_GOLD)
-        self.screen.blit(score_txt, (score_x, 8))
+        # Score & Streak
+        score_x = max(360, win_w // 2 - 120)
+        s_txt = self.font_large.render(f"SCORE: {state.score:04d}", True, TEXT_GOLD)
+        self.screen.blit(s_txt, (score_x, 8))
 
-        streak_col = (0, 255, 160) if state.streak > 0 else TEXT_MUTED
-        streak_mult = min(2.5, 1.0 + (state.streak // 3) * 0.2)
-        streak_txt = self.font_small.render(f"STREAK: {state.streak} (x{streak_mult:.1f}) | PASSED: {state.dodges} | MISSED: {state.hits}", True, streak_col)
-        self.screen.blit(streak_txt, (score_x, 38))
+        streak_col = SAFE_GREEN if state.streak > 0 else TEXT_MUTED
+        streak_mult = min(2.5, 1.0 + (state.streak // 2) * 0.2)
+        skips_left = max(0, 4 - engine.consecutive_skips)
+        stk_str = f"STREAK: {state.streak} (x{streak_mult:.1f}) | PASSED: {state.dodges} | SKIPS LEFT: {skips_left}"
+        stk_txt = self.font_small.render(stk_str, True, streak_col)
+        self.screen.blit(stk_txt, (score_x, 38))
 
-        secs = max(0, int(state.time_left_s))
-        time_col = (255, 60, 60) if secs <= 10 else (0, 220, 255)
-        time_txt = self.font_large.render(f"{secs:02d}s", True, time_col)
-        self.screen.blit(time_txt, (win_w - 100, 10))
+        # Round Countdown Timer Bar
+        t_box_w = 180
+        t_box_h = 16
+        t_x = win_w - t_box_w - 24
+        t_y = 20
 
-        # 3. Bottom Guidance Bar
-        bot_surface = pygame.Surface((win_w, HUD_BOT_H), pygame.SRCALPHA)
-        bot_surface.fill((12, 14, 18, 225))
-        self.screen.blit(bot_surface, (0, win_h - HUD_BOT_H))
-        pygame.draw.line(self.screen, (45, 55, 75), (0, win_h - HUD_BOT_H), (win_w, win_h - HUD_BOT_H), 2)
+        secs = max(0.0, engine.time_left_s)
+        time_ratio = max(0.0, min(1.0, secs / max(0.1, engine.round_duration_s)))
+        t_bar_col = (0, 220, 255) if secs > 3.0 else ((255, 160, 0) if secs > 1.5 else (255, 50, 50))
 
-        if banner_msg:
-            b_surf = self.font_mid.render(banner_msg, True, banner_color)
-            self.screen.blit(b_surf, b_surf.get_rect(center=(win_w // 2, win_h - HUD_BOT_H // 2)))
-        elif wall:
-            hint = wall.feedback_hint or wall.template.cue
-            hint_surf = self.font_small.render(f"HINT: {hint}", True, (255, 230, 0))
-            self.screen.blit(hint_surf, hint_surf.get_rect(center=(win_w // 2, win_h - HUD_BOT_H // 2)))
+        pygame.draw.rect(self.screen, (25, 30, 42), (t_x, t_y, t_box_w, t_box_h), border_radius=3)
+        pygame.draw.rect(self.screen, t_bar_col, (t_x, t_y, int(t_box_w * time_ratio), t_box_h), border_radius=3)
+        pygame.draw.rect(self.screen, (100, 120, 140), (t_x, t_y, t_box_w, t_box_h), 1, border_radius=3)
 
-        # 4. Result Overlay
+        time_val = self.font_large.render(f"{secs:04.1f}s", True, t_bar_col)
+        self.screen.blit(time_val, (t_x - 70, 14))
+
+        # ----------------------------------------------------------------------
+        # 6. Bottom Guidance Banner
+        # ----------------------------------------------------------------------
+        bot_surface = pygame.Surface((win_w, bot_h), pygame.SRCALPHA)
+        bot_surface.fill((12, 15, 20, 235))
+        self.screen.blit(bot_surface, (0, win_h - bot_h))
+        pygame.draw.line(self.screen, (45, 55, 75), (0, win_h - bot_h), (win_w, win_h - bot_h), 2)
+
+        if engine.banner_msg:
+            b_surf = self.font_mid.render(engine.banner_msg.upper(), True, engine.banner_color)
+            self.screen.blit(b_surf, b_surf.get_rect(center=(win_w // 2, win_h - bot_h // 2)))
+        elif match_res:
+            hint_txt = f"HINT: {match_res.primary_hint.upper()}"
+            h_surf = self.font_mid.render(hint_txt, True, TEXT_GOLD)
+            self.screen.blit(h_surf, h_surf.get_rect(center=(win_w // 2, win_h - bot_h // 2)))
+
+        # ----------------------------------------------------------------------
+        # 7. Match Progress Gauge inside Live View
+        # ----------------------------------------------------------------------
+        gauge_w = int(cam_w * 0.48)
+        gauge_h = 24
+        gx = cam_x + 16
+        gy = cam_y + 16
+
+        pygame.draw.rect(self.screen, (20, 24, 32), (gx, gy, gauge_w, gauge_h), border_radius=4)
+        pct = match_res.match_pct if match_res else 0.0
+        fill_gw = int(gauge_w * min(1.0, pct / 100.0))
+        g_col = SAFE_GREEN if (match_res and match_res.is_matched) else (TEXT_GOLD if pct >= 50 else (240, 50, 50))
+        pygame.draw.rect(self.screen, g_col, (gx, gy, fill_gw, gauge_h), border_radius=4)
+        pygame.draw.rect(self.screen, (255, 255, 255), (gx, gy, gauge_w, gauge_h), 2, border_radius=4)
+
+        pass_line_x = gx + int(gauge_w * 0.65)
+        pygame.draw.line(self.screen, (255, 255, 255), (pass_line_x, gy - 3), (pass_line_x, gy + gauge_h + 3), 2)
+
+        gauge_str = f"MATCH: {pct:.1f}% (PASS >= 65%)"
+        if match_res and match_res.is_matched:
+            req_h = 0.20 if engine.current_stage == 2 else 0.35
+            h_pct = int(min(100.0, (engine.hold_timer_s / req_h) * 100.0))
+            gauge_str = f"LOCKED: {pct:.1f}% [HOLD: {h_pct}%]"
+        g_txt = self.font_small.render(gauge_str, True, (255, 255, 255))
+        self.screen.blit(g_txt, (gx + 8, gy + 4))
+
+        # ----------------------------------------------------------------------
+        # 8. Tournament Result Phase Overlay
+        # ----------------------------------------------------------------------
         if state.phase == Phase.RESULT:
             overlay = pygame.Surface((win_w, win_h), pygame.SRCALPHA)
-            overlay.fill((10, 12, 16, 230))
+            overlay.fill((10, 12, 18, 235))
             self.screen.blit(overlay, (0, 0))
 
-            over_title = self.font_title.render("GAME OVER!", True, TEXT_GOLD)
+            over_title = self.font_title.render("TOURNAMENT COMPLETE!", True, TEXT_GOLD)
             final_score = self.font_large.render(f"FINAL SCORE: {state.score}", True, TEXT_WHITE)
-            stats = self.font_mid.render(f"WALLS PASSED: {state.dodges}   MISSED: {state.hits}   BEST STREAK: {state.best_streak}", True, (0, 220, 255))
+
+            total_att = state.dodges + state.hits
+            acc = int(round((state.dodges / max(1, total_att)) * 100))
+            stats = self.font_mid.render(
+                f"POSES CLEARED: {state.dodges}/{engine.total_rounds}   ACCURACY: {acc}%   SKIPS: {engine.total_skips}",
+                True,
+                (0, 220, 255),
+            )
+
             prompt = self.font_mid.render("PRESS [R] TO PLAY AGAIN   |   [ESC] TO EXIT", True, SAFE_GREEN)
 
             self.screen.blit(over_title, over_title.get_rect(center=(win_w // 2, win_h // 2 - 80)))
@@ -472,3 +405,7 @@ class WallArenaRenderer:
             self.screen.blit(prompt, prompt.get_rect(center=(win_w // 2, win_h // 2 + 90)))
 
         pygame.display.flip()
+
+
+# Backward compatibility alias
+WallArenaRenderer = BlazerArenaRenderer

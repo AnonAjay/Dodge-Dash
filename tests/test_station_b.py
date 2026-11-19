@@ -1,168 +1,148 @@
-"""Unit tests for Station B (Wall Shape) game logic."""
-from pose_core.pose_matcher import DEFAULT_TEMPLATES
-from shared.contracts import Phase, PoseFrame
+"""Unit tests for Station B (Pose Blazer Tournament) game logic."""
+import time
+from shared.contracts import Phase, PoseFrame, ScoreEvent
 from station_b.logic import (
-    ARENA_DEPTH_M,
-    COLLISION_TOLERANCE_M,
-    WallShapeEngine,
-    WallState,
+    BlazerGameEngine,
+    BlazerRoundRecord,
+    is_arms_crossed,
+    STAGE_1_DURATION_S,
+    STAGE_2_DURATION_S,
+    MAX_CONSECUTIVE_SKIPS,
 )
+from pose_core.blazer_matcher import load_blazer_catalog
 
 
-def test_wall_shape_initialization():
-    engine = WallShapeEngine(duration_s=60.0)
+def test_station_b_tournament_initialization():
+    catalog = load_blazer_catalog("data/poses_index.json")
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
     engine.start_game("P001")
+
     assert engine.state.phase == Phase.PLAYING
     assert engine.state.score == 0
     assert engine.state.dodges == 0
     assert engine.state.hits == 0
     assert engine.state.streak == 0
+    assert engine.round_number == 1
+    assert engine.current_stage == 1
+    assert engine.current_stage_name == "PRECISION BLITZ"
+    assert engine.time_left_s == STAGE_1_DURATION_S
 
 
-def test_wall_spawns_and_moves_with_dt():
-    engine = WallShapeEngine(duration_s=60.0)
+def test_station_b_precision_blitz_perfection_bonus():
+    catalog = load_blazer_catalog("data/poses_index.json")
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
     engine.start_game("P001")
-    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9)
 
-    # Cooldown is 0.5s at start; tick 0.6s
-    for _ in range(6):
-        engine.update(pose, dt=0.1)
+    pose = PoseFrame(tracked=True)
+    matching_angles = dict(engine.current_pose.target_angles)
 
-    assert engine.active_wall is not None
-    initial_y = engine.active_wall.y_m
-    assert abs(initial_y - ARENA_DEPTH_M) < 0.1
+    # Hold matching pose in Stage 1 for 0.4s
+    for _ in range(4):
+        engine.update(pose, dt=0.1, player_angles=matching_angles)
 
-    # Advance 0.5s -> wall must glide forward (smaller y)
-    for _ in range(5):
-        engine.update(pose, dt=0.1)
-
-    assert engine.active_wall.y_m < initial_y
+    # 100 base + 150 perfection (>= 85%) + speed bonus
+    assert engine.is_pose_locked is True
+    assert engine.state.dodges == 1
+    assert engine.state.score >= 250
+    assert "PERFECTION" in engine.banner_msg
 
 
-def test_wall_collision_pass_with_matching_pose():
-    engine = WallShapeEngine(duration_s=60.0)
+def test_station_b_speed_rush_progression():
+    catalog = load_blazer_catalog("data/poses_index.json")
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
     engine.start_game("P001")
-    wall = engine.spawn_wall()
-    engine.active_wall = wall
 
-    # Player standing at depth y = 0.9m
-    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9)
+    # Fast-forward to Round 4 (Stage 2: Speed Rush)
+    for r in range(1, 4):
+        engine.current_round_idx = r
+        engine._reset_round_timers()
 
-    # Position wall just in front of player
-    wall.y_m = 0.9 + COLLISION_TOLERANCE_M - 0.01
+    assert engine.round_number == 4
+    assert engine.current_stage == 2
+    assert engine.current_stage_name == "SPEED RUSH"
+    assert engine.time_left_s == STAGE_2_DURATION_S
 
-    # Matching T-Pose angles (template 0 is T-Pose)
-    matching_angles = {
-        "left_shoulder": 95.0,
-        "right_shoulder": 95.0,
-        "left_elbow": 170.0,
-        "right_elbow": 170.0,
-        "left_knee": 165.0,
-        "right_knee": 165.0,
-    }
+    # Rapid snap (0.2s hold in Speed Rush)
+    pose = PoseFrame(tracked=True)
+    matching_angles = dict(engine.current_pose.target_angles)
+    for _ in range(3):
+        engine.update(pose, dt=0.1, player_angles=matching_angles)
 
-    state, active_wall = engine.update(pose, dt=0.01, player_angles=matching_angles)
-    assert active_wall is not None
-    assert active_wall.judged is True
-    assert active_wall.state == WallState.PASSED
-    assert active_wall.match_pct >= 75.0
-    assert state.dodges == 1
-    assert state.hits == 0
-    assert state.streak == 1
-    assert state.score >= 100
+    assert engine.is_pose_locked is True
+    # Fast snap with ~4.7s left awards massive speed bonus (~180 pts)
+    assert engine.state.score >= 250
 
 
-def test_wall_collision_head_alignment():
-    engine = WallShapeEngine(duration_s=60.0)
+def test_station_b_folded_arms_skip():
+    catalog = load_blazer_catalog("data/poses_index.json")
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
     engine.start_game("P001")
-    wall = engine.spawn_wall()
-    engine.active_wall = wall
 
-    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9)
-    wall.y_m = 0.9 + COLLISION_TOLERANCE_M - 0.01
-
-    matching_angles = {
-        "left_shoulder": 95.0,
-        "right_shoulder": 95.0,
-        "left_elbow": 170.0,
-        "right_elbow": 170.0,
-        "left_knee": 165.0,
-        "right_knee": 165.0,
-    }
-
-    # Case A: Head misaligned (far left, x=0.10) -> Hit despite matching angles
-    state, active_wall = engine.update(
-        pose, dt=0.01, player_angles=matching_angles, player_head_norm=(0.10, 0.25)
-    )
-    assert active_wall.judged is True
-    assert active_wall.head_aligned is False
-    assert active_wall.state == WallState.HIT
-    assert state.hits == 1
-
-    # Reset for Case B: Head aligned in target box (centered, x=0.50, y=0.25) -> Pass
-    engine.start_game("P001")
-    wall2 = engine.spawn_wall()
-    engine.active_wall = wall2
-    wall2.y_m = 0.9 + COLLISION_TOLERANCE_M - 0.01
-
-    state, active_wall2 = engine.update(
-        pose, dt=0.01, player_angles=matching_angles, player_head_norm=(0.50, 0.25)
-    )
-    assert active_wall2.judged is True
-    assert active_wall2.head_aligned is True
-    assert active_wall2.state == WallState.PASSED
-    assert state.dodges == 1
-
-
-def test_wall_collision_fail_with_wrong_pose():
-    engine = WallShapeEngine(duration_s=60.0)
-    engine.start_game("P001")
-    wall = engine.spawn_wall()
-    engine.active_wall = wall
-
-    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9)
-    wall.y_m = 0.9
-
-    # Wrong pose: arms down (shoulder 20 deg, elbows bent)
-    wrong_angles = {
+    pose = PoseFrame(tracked=True)
+    folded_angles = {
         "left_shoulder": 20.0,
         "right_shoulder": 20.0,
-        "left_elbow": 90.0,
-        "right_elbow": 90.0,
-        "left_knee": 165.0,
-        "right_knee": 165.0,
+        "left_elbow": 75.0,
+        "right_elbow": 75.0,
     }
 
-    state, active_wall = engine.update(pose, dt=0.01, player_angles=wrong_angles)
-    assert active_wall is not None
-    assert active_wall.judged is True
-    assert active_wall.state == WallState.HIT
-    assert active_wall.match_pct < 75.0
-    assert state.dodges == 0
-    assert state.hits == 1
-    assert state.streak == 0
-    assert state.score == 0
+    # Hold folded arms for 1.1s (exceeding 1.0s requirement)
+    for _ in range(11):
+        engine.update(pose, dt=0.1, player_angles=folded_angles)
+
+    assert engine.consecutive_skips == 1
+    assert engine.state.hits == 1
+    assert "SKIPPED" in engine.banner_msg
 
 
-def test_wall_despawns_and_cooldown_triggers_next():
-    engine = WallShapeEngine(duration_s=60.0)
+def test_station_b_elimination_after_4_skips():
+    catalog = load_blazer_catalog("data/poses_index.json")
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
     engine.start_game("P001")
-    wall = engine.spawn_wall()
-    engine.active_wall = wall
 
-    # Teleport wall past near edge
-    wall.y_m = -0.35
-    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9)
+    pose = PoseFrame(tracked=True)
+    folded_angles = {
+        "left_shoulder": 20.0,
+        "right_shoulder": 20.0,
+        "left_elbow": 75.0,
+        "right_elbow": 75.0,
+    }
 
-    # Update should despawn active wall
-    state, active_wall = engine.update(pose, dt=0.05)
-    assert engine.active_wall is None
-    assert engine.cooldown_timer > 0.0
+    for skip_idx in range(1, 5):
+        for _ in range(11):  # 1.1s folded arms
+            engine.update(pose, dt=0.1, player_angles=folded_angles)
+        assert engine.consecutive_skips == skip_idx
+        if skip_idx < 4:
+            for _ in range(11):  # cooldown between poses
+                engine.update(pose, dt=0.1)
 
-    # Advance through cooldown
-    for _ in range(10):
-        engine.update(pose, dt=0.1)
+    # 4 consecutive skips triggers instant disqualification
+    assert engine.state.phase == Phase.RESULT
+    assert "ELIMINATED" in engine.banner_msg
 
-    # Next wall spawned with next template
-    assert engine.active_wall is not None
-    assert engine.active_wall.template.id == DEFAULT_TEMPLATES[1].id
+
+def test_station_b_score_event_contract():
+    catalog = load_blazer_catalog("data/poses_index.json")
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
+    engine.start_game("P001")
+
+    # Complete tournament
+    engine.state.score = 850
+    engine.state.dodges = 5
+    engine.state.hits = 1
+    engine._finish_game()
+
+    score_event = ScoreEvent(
+        event_id=f"B-BLAZER-P001-{int(time.time())}",
+        player_id="P001",
+        station="B",
+        game="blazer",
+        score=engine.state.score,
+        accuracy=0.83,
+        best_streak=engine.state.streak,
+        duration_s=engine.round_duration_s * engine.total_rounds,
+        finished_at="2026-11-20T00:00:00Z",
+    )
+    assert score_event.station == "B"
+    assert score_event.game == "blazer"
+    assert score_event.score == 850
