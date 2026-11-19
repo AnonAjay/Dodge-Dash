@@ -26,8 +26,8 @@ GRID_SIZE = 10           # 10x10 subtiles
 DEFAULT_ARENA_M = 1.8    # 1.8m x 1.8m physical floor
 SUBTILE_M = DEFAULT_ARENA_M / GRID_SIZE  # 0.18 m (18 cm) per cell
 
-ROUND_DURATION_S = 60.0  # 60.0s active play per round
-DEFAULT_ROUND_DURATION_S = 60.0  # Alias for backward-compatibility
+ROUND_DURATION_S = 30.0  # 30.0s active play per round
+DEFAULT_ROUND_DURATION_S = 30.0  # Alias for backward-compatibility
 REST_DURATION_S = 7.5    # 7.5s resting interval between rounds
 TOTAL_ROUNDS = 3
 FEET_LOCK_REQUIRED_S = 0.5

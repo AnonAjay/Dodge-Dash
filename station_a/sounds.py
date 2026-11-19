@@ -1,11 +1,13 @@
-"""Station A: Retro 8-Bit Chiptune Arcade Sound Manager & Offline Voice Announcer.
+"""Station A: Retro 8-Bit Chiptune Arcade Sound Manager & Offline Announcer.
 Provides lightweight, offline sound effects synthesized in memory using NumPy and Pygame,
-plus asynchronous, non-blocking spoken arcade callouts using Windows speech synthesis.
+plus punchy 90s retro arcade cabinet announcer voice callouts with pitch-shift,
+slapback echo, stereo chorus, and soft-clip saturation.
 Safely falls back to silent operation in headless environments or systems without audio devices.
 Checks assets/sounds/*.wav first for custom audio files before synthesizing.
 """
 from __future__ import annotations
 
+import io
 import os
 from pathlib import Path
 import platform
@@ -13,12 +15,13 @@ import queue
 import subprocess
 import sys
 import threading
+import wave
 import numpy as np
 import pygame
 
 
 class ArcadeSoundManager:
-    """Lightweight chiptune audio generator, sound player, and offline voice announcer for Titans' Arcade."""
+    """Lightweight chiptune audio generator, sound player, and offline retro arcade voice announcer."""
 
     def __init__(
         self,
@@ -30,6 +33,7 @@ class ArcadeSoundManager:
         self.enabled = False
         self.enable_voice = enable_voice
         self.sounds: dict[str, pygame.mixer.Sound] = {}
+        self._voice_cache: dict[str, pygame.mixer.Sound] = {}
 
         if custom_sounds_dir is None:
             # Default to repo root / assets / sounds
@@ -46,7 +50,7 @@ class ArcadeSoundManager:
         except Exception:
             self.enabled = False
 
-        # 2. Pre-generate or load all sound effects
+        # 2. Pre-generate or load all chiptune sound effects
         if self.enabled:
             self._load_or_synthesize_all()
 
@@ -75,27 +79,158 @@ class ArcadeSoundManager:
             self._voice_thread = None
 
     def _voice_worker(self) -> None:
-        """Background thread worker to speak phrases sequentially without blocking the 60 FPS Pygame loop."""
+        """Background worker thread to synthesize & play voice callouts without blocking the 60 FPS Pygame loop."""
         while True:
             try:
                 phrase = self._voice_queue.get()
                 if phrase is None:
                     break
-                self._speak_sync(phrase)
+
+                # 1. If already cached as DSP-processed Sound, play directly
+                if phrase in self._voice_cache:
+                    try:
+                        self._voice_cache[phrase].play()
+                    except Exception:
+                        pass
+                else:
+                    # 2. Synthesize phrase into memory stream and apply arcade DSP
+                    sound = self._synthesize_voice_clip(phrase)
+                    if sound is not None:
+                        self._voice_cache[phrase] = sound
+                        try:
+                            sound.play()
+                        except Exception:
+                            pass
+                    else:
+                        # 3. Safe fallback to direct speech if MemoryStream audio unavailable
+                        self._speak_fallback(phrase)
+
                 self._voice_queue.task_done()
             except Exception:
                 pass
 
-    def _speak_sync(self, phrase: str) -> None:
-        """Execute speech synchronously inside the worker thread."""
-        if not self.enable_voice:
-            return
+    def _synthesize_voice_clip(self, phrase: str) -> pygame.mixer.Sound | None:
+        """Synthesize speech into in-memory WAV buffer and apply punchy retro arcade DSP."""
+        clean_phrase = "".join(c for c in phrase if c.isalnum() or c in " !?.,'-").strip()
+        if not clean_phrase:
+            return None
 
+        # 1. Check custom wav file in assets/sounds/
+        slug = clean_phrase.lower().replace(" ", "_").replace("!", "").replace(".", "").replace(",", "")
+        if self.custom_dir.is_dir():
+            for candidate in (f"voice_{slug}.wav", f"{slug}.wav"):
+                p = self.custom_dir / candidate
+                if p.is_file():
+                    try:
+                        return pygame.mixer.Sound(str(p))
+                    except Exception:
+                        pass
+
+        # 2. Synthesize using Windows SpeechSynthesizer into memory stream
+        if sys.platform == "win32" or platform.system() == "Windows":
+            try:
+                # Rate = 2 gives fast tempo that becomes thick & authoritative when resampled/pitched down
+                ps_script = (
+                    "Add-Type -AssemblyName System.Speech; "
+                    "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                    "$ms = New-Object System.IO.MemoryStream; "
+                    "$s.SetOutputToWaveStream($ms); "
+                    "$s.Rate = 2; "
+                    f"$s.Speak('{clean_phrase}'); "
+                    "$bytes = $ms.ToArray(); "
+                    "[System.Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)"
+                )
+                creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                    capture_output=True,
+                    timeout=5,
+                    creationflags=creation_flags,
+                )
+                if proc.returncode == 0 and len(proc.stdout) > 44:
+                    sound = self._apply_retro_arcade_dsp(proc.stdout)
+                    if sound is not None:
+                        return sound
+            except Exception:
+                pass
+
+        return None
+
+    def _apply_retro_arcade_dsp(self, wav_bytes: bytes) -> pygame.mixer.Sound | None:
+        """Apply fast NumPy retro arcade audio DSP:
+        - Pitch/formant shift (resample to lower/authoritative register ~0.90x)
+        - Resample to target sample rate (44100 Hz)
+        - 35ms and 75ms slapback cabinet echo (at 30% and 15% gain)
+        - Dual-voice stereo chorus / Haas micro-delay
+        - Soft-clip saturation via np.tanh for arcade speaker warmth
+        """
+        try:
+            if len(wav_bytes) <= 44:
+                return None
+            with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+                sr = wf.getframerate()
+                n_channels = wf.getnchannels()
+                raw_frames = wf.readframes(wf.getnframes())
+                audio_int16 = np.frombuffer(raw_frames, dtype=np.int16)
+                if n_channels == 2:
+                    audio_mono = audio_int16[::2].astype(np.float32) / 32768.0
+                else:
+                    audio_mono = audio_int16.astype(np.float32) / 32768.0
+
+            if len(audio_mono) == 0:
+                return None
+
+            # 1. Pitch / Speed Resampling (0.90x speed = lower, authoritative arcade announcer register)
+            pitch_factor = 0.90
+            old_x = np.arange(len(audio_mono))
+            new_x = np.linspace(0, len(audio_mono) - 1, int(len(audio_mono) / pitch_factor))
+            resampled = np.interp(new_x, old_x, audio_mono)
+
+            # 2. Resample to target sample rate if needed
+            target_sr = self.sample_rate
+            if sr != target_sr:
+                old_sr_x = np.arange(len(resampled))
+                new_sr_x = np.linspace(0, len(resampled) - 1, int(len(resampled) * (target_sr / sr)))
+                resampled = np.interp(new_sr_x, old_sr_x, resampled)
+
+            # 3. Slapback Echo (35ms at 30%, 75ms at 15%)
+            d1 = int(target_sr * 0.035)
+            d2 = int(target_sr * 0.075)
+            base_sig = np.pad(resampled, (0, d2))
+            echo1 = np.pad(resampled * 0.30, (d1, d2 - d1))
+            echo2 = np.pad(resampled * 0.15, (d2, 0))
+            mixed = base_sig + echo1 + echo2
+
+            # 4. Stereo Chorus / Dual-voice detune (Haas effect 8ms delay between L and R)
+            delay_lr = int(target_sr * 0.008)
+            left_chan = mixed.copy()
+            right_chan = np.pad(mixed[:-delay_lr], (delay_lr, 0))
+
+            # 5. Soft-clip saturation (np.tanh) for arcade cabinet drive
+            left_sat = np.tanh(left_chan * 1.35)
+            right_sat = np.tanh(right_chan * 1.35)
+
+            # Normalize peak to 0.92
+            peak = max(float(np.max(np.abs(left_sat))), float(np.max(np.abs(right_sat))))
+            if peak > 0:
+                left_sat = (left_sat / peak) * 0.92
+                right_sat = (right_sat / peak) * 0.92
+
+            # Convert to 16-bit signed stereo PCM
+            left_pcm = (left_sat * 32767).astype(np.int16)
+            right_pcm = (right_sat * 32767).astype(np.int16)
+            stereo = np.column_stack((left_pcm, right_pcm))
+
+            return pygame.sndarray.make_sound(stereo)
+        except Exception:
+            return None
+
+    def _speak_fallback(self, phrase: str) -> None:
+        """Fallback direct speech if DSP synthesis into memory stream is unavailable."""
         clean_phrase = "".join(c for c in phrase if c.isalnum() or c in " !?.,'-").strip()
         if not clean_phrase:
             return
 
-        # 1. Try Windows SAPI via COM dispatch if available
         if self._sapi_voice is not None:
             try:
                 self._sapi_voice.Speak(clean_phrase)
@@ -103,10 +238,8 @@ class ArcadeSoundManager:
             except Exception:
                 self._sapi_voice = None
 
-        # 2. Fall back to background PowerShell System.Speech or SAPI on Windows
         if sys.platform == "win32" or platform.system() == "Windows":
             try:
-                # Set Rate = 1 for energetic arcade announcer cadence
                 ps_script = (
                     "Add-Type -AssemblyName System.Speech; "
                     "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
@@ -128,6 +261,14 @@ class ArcadeSoundManager:
         """Enqueue an announcer voice callout asynchronously."""
         if not self.enable_voice:
             return
+        # If already cached as a Sound, play directly
+        if phrase in self._voice_cache:
+            try:
+                self._voice_cache[phrase].play()
+                return
+            except Exception:
+                pass
+
         try:
             # Drain queue if full to prevent stale voice lag
             while self._voice_queue.full():
@@ -280,18 +421,19 @@ class ArcadeSoundManager:
             pass
 
     def play_game_start(self) -> None:
-        """Play rising 4-note fanfare when game begins or restarts (music only, no speech clash)."""
+        """Play rising 4-note fanfare and announce 'Game Start! Step into the arena!'."""
         self.play("game_start")
+        self.speak("Game Start! Step into the arena!")
 
     def play_round_start(self, round_num: int = 1) -> None:
-        """Play energetic chiptune jingle and speak arcade callout for Round 1, 2, or 3."""
+        """Play energetic chiptune jingle and speak punchy arcade callout for Round 1, 2, or 3."""
         key = f"round_{min(3, max(1, round_num))}"
         self.play(key)
 
         if round_num == 1:
-            self.speak("Round 1!")
+            self.speak("Round One! Ready... Go!")
         elif round_num == 2:
-            self.speak("Round 2!")
+            self.speak("Round Two!")
         else:
             self.speak("Final Round!")
 

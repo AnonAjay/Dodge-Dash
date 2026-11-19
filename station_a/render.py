@@ -524,6 +524,8 @@ class LavaArenaRenderer:
 
         # Retro 8-Bit Arcade Sound Manager & State Tracking
         self.sound_mgr = ArcadeSoundManager(enable_voice=enable_voice)
+        self._feet_locked: bool = False
+        self._game_start_sound_played: bool = False
         self._prev_phase: Phase | None = None
         self._last_round_announced: int = 0
         self._game_over_sound_played: bool = False
@@ -888,7 +890,7 @@ class LavaArenaRenderer:
         self.screen.fill((16, 18, 22))
 
         # ======================================================================
-        # 0. RETRO 8-BIT ARCADE SOUND STATE TRANSITIONS
+        # 0. RETRO 8-BIT ARCADE SOUND & STATE TRANSITIONS
         # ======================================================================
         is_playing = (state.phase == Phase.PLAYING)
         was_playing = (self._prev_phase == Phase.PLAYING)
@@ -903,22 +905,44 @@ class LavaArenaRenderer:
         )
 
         if (is_playing and not was_playing) or is_restarted:
-            self.sound_mgr.play_game_start()
+            self._feet_locked = False
+            self._game_start_sound_played = False
             self._last_round_announced = 0
             self._game_over_sound_played = False
 
-        # Round announcements: when round popup card triggers (round_timer > 0 or is_resting)
-        if (round_timer > 0.0 or is_resting) and round_title:
-            up_title = round_title.upper()
-            if "ROUND 1" in up_title and self._last_round_announced < 1:
-                self.sound_mgr.play_round_start(1)
-                self._last_round_announced = 1
-            elif "ROUND 2" in up_title and self._last_round_announced < 2:
-                self.sound_mgr.play_round_start(2)
-                self._last_round_announced = 2
-            elif ("ROUND 3" in up_title or "FINAL" in up_title) and self._last_round_announced < 3:
-                self.sound_mgr.play_round_start(3)
-                self._last_round_announced = 3
+        # Detect when feet lock onto the arena:
+        # Feet lock when is_resting is True in round 1, or round_sub signals resting/prepare/starting,
+        # or banner message signals locked feet/gameplay
+        if not self._feet_locked:
+            if is_resting or any(k in round_sub.upper() for k in ("REST", "PREPARE", "STARTING", "READY")):
+                self._feet_locked = True
+            elif any(k in banner_msg.upper() for k in ("LOCKED", "ROUND 1 GET READY", "RIVER", "ISLAND", "DONUT", "BRIDGE", "DODGED", "BURNT")):
+                self._feet_locked = True
+
+        # Pre-entry waiting condition: Phase.CALIBRATING or Round 1 before feet lock
+        is_waiting_for_entry = (
+            (state.phase == Phase.CALIBRATING)
+            or (is_playing and current_round == 1 and not self._feet_locked)
+        )
+
+        # Pre-Entry: Trigger GAME START fanfare + voice callout once
+        if is_waiting_for_entry:
+            if not self._game_start_sound_played:
+                self.sound_mgr.play_game_start()
+                self._game_start_sound_played = True
+        else:
+            # Active Round Announcements: Trigger once when feet lock and round banner triggers
+            if (round_timer > 0.0 or is_resting) and round_title:
+                up_title = round_title.upper()
+                if "ROUND 1" in up_title and self._last_round_announced < 1:
+                    self.sound_mgr.play_round_start(1)
+                    self._last_round_announced = 1
+                elif "ROUND 2" in up_title and self._last_round_announced < 2:
+                    self.sound_mgr.play_round_start(2)
+                    self._last_round_announced = 2
+                elif ("ROUND 3" in up_title or "FINAL" in up_title) and self._last_round_announced < 3:
+                    self.sound_mgr.play_round_start(3)
+                    self._last_round_announced = 3
 
         # Game Over: Transition into Phase.RESULT
         if state.phase == Phase.RESULT:
@@ -1054,8 +1078,21 @@ class LavaArenaRenderer:
         # ======================================================================
         # 3. CENTER-SCREEN COMPACT ROUND ANNOUNCEMENT CARD
         # ======================================================================
-        if (round_timer > 0.0 or is_resting) and round_title:
-            card_w = 360
+        show_card = is_waiting_for_entry or ((round_timer > 0.0 or is_resting) and round_title)
+        if show_card:
+            if is_waiting_for_entry:
+                display_title = "GAME START"
+                display_sub = "STEP INTO THE ARENA TO BEGIN"
+                title_top, title_bot = (255, 224, 51), (232, 56, 24)
+                sub_top, sub_bot = (0, 245, 212), (56, 239, 125)
+                card_w = 420
+            else:
+                display_title = round_title
+                display_sub = round_sub
+                title_top, title_bot = (255, 224, 51), (232, 56, 24)
+                sub_top, sub_bot = (56, 239, 125), (245, 248, 255)
+                card_w = 360
+
             card_h = 240
             card_x = (win_w - card_w) // 2
             card_y = (win_h - card_h) // 2
@@ -1069,13 +1106,13 @@ class LavaArenaRenderer:
             pygame.draw.rect(self.screen, (255, 77, 109), (card_x + 3, card_y + 3, card_w - 6, card_h - 6), width=1, border_radius=8)
 
             # Centered large 8-bit title in golden-yellow / red-orange
-            t_surf = render_pixel_text(round_title, scale=4, top_color=(255, 224, 51), bottom_color=(232, 56, 24), shadow_offset=3)
+            t_surf = render_pixel_text(display_title, scale=4, top_color=title_top, bottom_color=title_bot, shadow_offset=3)
             t_rect = t_surf.get_rect(center=(win_w // 2, card_y + 80))
             self.screen.blit(t_surf, t_rect)
 
-            # Compact subtitle underneath in mint green / white
-            if round_sub:
-                s_surf = render_pixel_text(round_sub, scale=2, top_color=(56, 239, 125), bottom_color=(245, 248, 255), shadow_offset=2)
+            # Compact subtitle underneath
+            if display_sub:
+                s_surf = render_pixel_text(display_sub, scale=2, top_color=sub_top, bottom_color=sub_bot, shadow_offset=2)
                 s_rect = s_surf.get_rect(center=(win_w // 2, card_y + 160))
                 self.screen.blit(s_surf, s_rect)
 
