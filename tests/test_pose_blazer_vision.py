@@ -502,6 +502,7 @@ def test_blazer_skip_and_consecutive_elimination():
     catalog = load_blazer_catalog("data/poses_index.json")
     engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
     engine.start_game("P001")
+    engine.tournament_phase = "active"
 
     pose_frame = PoseFrame(tracked=True)
     folded_angles = {
@@ -548,14 +549,15 @@ def test_blazer_2_stage_tournament_progression():
     from station_b.blazer_logic import BlazerGameEngine
 
     catalog = load_blazer_catalog("data/poses_index.json")
-    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=10, tournament_mode=True)
     engine.start_game("P001")
+    engine.tournament_phase = "active"
 
-    # Round 1 is Stage 1: Precision Blitz (10.0s)
+    # Round 1 is Stage 1: Precision Blitz (6.0s)
     assert engine.round_number == 1
     assert engine.current_stage == 1
     assert engine.current_stage_name == "PRECISION BLITZ"
-    assert engine.time_left_s == 10.0
+    assert engine.time_left_s == 6.0
 
     pose_frame = PoseFrame(tracked=True)
     # Perfect match in Stage 1 -> awards +150 perfection bonus
@@ -564,12 +566,12 @@ def test_blazer_2_stage_tournament_progression():
         engine.update(pose_frame, dt=0.1, player_angles=match_angles)
     assert engine.state.score >= 250  # Base 100 + 150 perfection
 
-    # Fast forward through rounds 1..3 to reach Stage 2 (round 4)
-    for r in range(1, 4):
-        engine.current_round_idx = r
-        engine._reset_round_timers()
+    # Transition to Round 2 (Speed Rush)
+    engine.current_round = 2
+    engine.tournament_phase = "active"
+    engine._reset_round_timers()
 
-    assert engine.round_number == 4
     assert engine.current_stage == 2
     assert engine.current_stage_name == "SPEED RUSH"
-    assert engine.time_left_s == 5.0  # Stage 2 uses 5.0s rush timer!
+    assert engine.time_left_s == 30.0  # Stage 2 uses 30.0s global speedrun timer!
+

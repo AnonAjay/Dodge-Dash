@@ -2,16 +2,19 @@
 PURE PYTHON: No cv2, no pygame, no network imports.
 
 Handles:
-  - 2-Stage Tournament Game State Machine:
-      * Stage 1: Precision Blitz (Rounds 1-3, 10.0s countdown, adjust posture for 4+ greens -> +150 perfection bonus).
-      * Stage 2: Speed Rush (Rounds 4-6, 5.0s countdown, instant snap on pass -> high speed bonus).
-  - Non-blocking Folded Arms Skip Gesture: hold crossed arms for 1.0s to forfeit round.
-  - Elimination Rule: 4 consecutive skips results in instant disqualification (Phase.RESULT).
-  - Default 6-limb tracking (LIMB_6_JOINTS) ignoring unstable hip angles.
-  - Integration with shared.contracts (Phase, GameState, PoseFrame).
+  - 2-Round Tournament Game Lifecycle:
+      * Round 1: Precision Blitz (10 poses, 6.0s max per pose, +150 perfection bonus for form >= 85%).
+      * Intermission (5.0s rest & countdown between rounds, "3, 2, 1, GO!").
+      * Round 2: Speed Rush (30.0s global continuous countdown, rapid snap speedrun).
+  - No Streak Multipliers: scoring is based strictly on precision form and reaction speed.
+  - Non-blocking Folded Arms Skip Gesture (1.0s in Round 1, 0.6s in Round 2).
+  - Elimination Constraint: 4 consecutive skips in Round 1 results in disqualification.
+  - Full-body presence gating: pauses when player is occluded or out of frame.
 """
 from __future__ import annotations
 
+from enum import Enum
+import math
 import random
 from dataclasses import dataclass, field
 from typing import Any, Sequence
@@ -27,41 +30,45 @@ from pose_core.blazer_matcher import (
 from shared.contracts import GameState, Phase, PoseFrame
 
 # Constants
-DEFAULT_ROUND_DURATION_S = 7.0
-DEFAULT_HOLD_REQUIRED_S = 0.30
-DEFAULT_COOLDOWN_PAUSE_S = 1.0
-DEFAULT_TOTAL_ROUNDS = 6
+ROUND_1_POSES_COUNT = 10
+ROUND_1_POSE_DURATION_S = 6.0
+ROUND_1_HOLD_S = 0.35
+ROUND_1_PERFECTION_PTS = 150
+ROUND_1_PERFECTION_THRESHOLD = 85.0
+ROUND_1_SKIP_HOLD_S = 1.0
+
+ROUND_2_GLOBAL_DURATION_S = 30.0
+ROUND_2_HOLD_S = 0.20
+ROUND_2_SKIP_HOLD_S = 0.60
+ROUND_2_SPEED_MULT = 45.0
+
+INTERMISSION_DURATION_S = 5.0
 BASE_MATCH_SCORE = 100
-PERFECTION_THRESHOLD_PCT = 85.0  # 4 greens out of 6 limbs achieves >= 85%
-PERFECTION_BONUS = 150
+MAX_CONSECUTIVE_SKIPS = 4
 
-# Tournament 2-Stage Configuration
-STAGE_1_ROUNDS = 3           # Rounds 1-3: Precision Blitz
-STAGE_1_DURATION_S = 10.0    # 10s counter to optimize greens
-STAGE_1_HOLD_S = 0.35        # 0.35s hold to confirm
-STAGE_1_PERFECTION_PTS = 150 # Awarded if match >= 85%
+# Backward-compatibility aliases
+STAGE_1_DURATION_S = ROUND_1_POSE_DURATION_S
+STAGE_2_DURATION_S = ROUND_2_GLOBAL_DURATION_S
+DEFAULT_ROUND_DURATION_S = ROUND_1_POSE_DURATION_S
+DEFAULT_HOLD_REQUIRED_S = ROUND_1_HOLD_S
+DEFAULT_COOLDOWN_PAUSE_S = 1.0
+DEFAULT_TOTAL_ROUNDS = ROUND_1_POSES_COUNT
+PERFECTION_THRESHOLD_PCT = ROUND_1_PERFECTION_THRESHOLD
+PERFECTION_BONUS = ROUND_1_PERFECTION_PTS
 
-STAGE_2_ROUNDS = 3           # Rounds 4-6: Speed Rush
-STAGE_2_DURATION_S = 5.0     # 5s speedrun rush
-STAGE_2_HOLD_S = 0.20        # 0.20s quick snap
-STAGE_2_SPEED_MULT = 40.0    # pts per second remaining
 
-# Skip & Elimination Constraints
-MAX_CONSECUTIVE_SKIPS = 4    # 4 consecutive skips = instant game over
-SKIP_HOLD_REQUIRED_S = 1.0   # Hold folded arms for 1.0s to skip pose
+class BlazerTournamentPhase(str, Enum):
+    WAITING_FOR_PLAYER = "waiting"
+    INTERMISSION = "intermission"
+    ROUND_ACTIVE = "active"
+    COMPLETED = "completed"
 
 
 def is_arms_crossed(
     player_angles: dict[str, float | None] | None,
     player_landmarks_norm: Sequence[Sequence[float]] | None = None,
 ) -> bool:
-    """Pure geometric check for crossed / folded arms skip gesture.
-
-    Requires:
-    1. Both elbows bent sharply across chest (50 to 105 deg).
-    2. Both shoulders lowered/neutral (< 50 deg).
-    3. If 33 normalized landmarks available, wrists must cross past each other at chest level.
-    """
+    """Pure geometric check for crossed / folded arms skip gesture."""
     if not player_angles:
         return False
 
@@ -77,11 +84,11 @@ def is_arms_crossed(
     if not (50.0 <= l_el <= 105.0 and 50.0 <= r_el <= 105.0):
         return False
 
-    # 2. Shoulders neutral or low (not raised in bicep flex or salute)
+    # 2. Shoulders neutral or low
     if not (l_sh < 50.0 and r_sh < 50.0):
         return False
 
-    # 3. If normalized landmarks available (MediaPipe 33 landmarks), verify wrist cross
+    # 3. If normalized landmarks available, verify wrist cross
     if player_landmarks_norm and len(player_landmarks_norm) >= 17:
         lw = player_landmarks_norm[15]  # L_WRIST
         rw = player_landmarks_norm[16]  # R_WRIST
@@ -94,6 +101,22 @@ def is_arms_crossed(
         if not (crossed and chest_level):
             return False
 
+    return True
+
+
+def check_body_in_frame(
+    player_landmarks: Sequence[Sequence[float]] | None,
+    tracked: bool = True,
+) -> bool:
+    """Verify player's core body limbs (shoulders, elbows, wrists, hips, knees) are in frame."""
+    if not tracked or not player_landmarks or len(player_landmarks) < 27:
+        return False
+    for idx in (11, 12, 13, 14, 15, 16, 23, 24, 25, 26):
+        lm = player_landmarks[idx]
+        x, y = float(lm[0]), float(lm[1])
+        vis = float(lm[2]) if len(lm) > 2 else 1.0
+        if vis < 0.35 or not (-0.05 <= x <= 1.05 and -0.05 <= y <= 1.05):
+            return False
     return True
 
 
@@ -112,32 +135,35 @@ class BlazerRoundRecord:
 
 
 class BlazerGameEngine:
-    """State machine governing the 2-Stage Tournament Pose Blazer game."""
+    """State machine governing the 2-Round Tournament Pose Blazer game."""
 
     def __init__(
         self,
         catalog: list[BlazerPoseTemplate] | None = None,
         catalog_path: str = "data/poses_index.json",
         round_duration_s: float | None = None,
-        total_rounds: int = DEFAULT_TOTAL_ROUNDS,
+        total_rounds: int = ROUND_1_POSES_COUNT,
         active_joints: Sequence[str] | None = None,
-        check_head: bool = True,
+        check_head: bool = False,
         timer_enabled: bool = True,
         tournament_mode: bool = True,
     ) -> None:
         self.tournament_mode = tournament_mode
         self.total_rounds = int(total_rounds)
-        # Default to 6 limb joints (shoulders, elbows, knees) ignoring ambiguous hip
         self.active_joints = list(active_joints) if active_joints is not None else list(LIMB_6_JOINTS)
         self.check_head = check_head
         self.timer_enabled = timer_enabled
 
-        # If custom duration provided, disable dynamic stage durations
         if round_duration_s is not None:
-            self.round_duration_s = float(round_duration_s)
+            self.round_duration_s: float = float(round_duration_s)
+            self.time_left_s: float = float(round_duration_s)
             self.tournament_mode = False
+            self.tournament_phase = BlazerTournamentPhase.ROUND_ACTIVE
         else:
-            self.round_duration_s = STAGE_1_DURATION_S if self.tournament_mode else DEFAULT_ROUND_DURATION_S
+            self.round_duration_s: float = ROUND_1_POSE_DURATION_S
+            self.time_left_s: float = ROUND_1_POSE_DURATION_S
+            self.tournament_mode = tournament_mode
+            self.tournament_phase = BlazerTournamentPhase.WAITING_FOR_PLAYER
 
         if catalog is not None and len(catalog) > 0:
             self.full_catalog = list(catalog)
@@ -148,15 +174,28 @@ class BlazerGameEngine:
             raise ValueError(f"Blazer catalog at '{catalog_path}' is empty.")
 
         self.state = GameState(phase=Phase.IDLE)
-        self.round_poses: list[BlazerPoseTemplate] = []
-        self.current_round_idx: int = 0
-        self.time_left_s: float = self.round_duration_s
+
+        # Rounds tracking
+        self.current_round: int = 1
+        self.round_1_poses: list[BlazerPoseTemplate] = []
+        self.round_2_pool: list[BlazerPoseTemplate] = []
+        self.current_round_idx: int = 0  # In Round 1: 0..9
+
+        # Timers
+        self.intermission_timer_s: float = INTERMISSION_DURATION_S
+        self.round_2_timer_s: float = ROUND_2_GLOBAL_DURATION_S
+        self.pose_elapsed_s: float = 0.0
         self.hold_timer_s: float = 0.0
         self.skip_hold_s: float = 0.0
+        self.cooldown_timer_s: float = 0.0
+
+        # Stats
         self.consecutive_skips: int = 0
         self.total_skips: int = 0
+        self.perfections_count: int = 0
+        self.r1_cleared: int = 0
+        self.r2_cleared: int = 0
         self.is_pose_locked: bool = False
-        self.cooldown_timer_s: float = 0.0
 
         self.banner_msg: str = ""
         self.banner_color: tuple[int, int, int] = (255, 204, 0)
@@ -165,65 +204,60 @@ class BlazerGameEngine:
 
     @property
     def current_pose(self) -> BlazerPoseTemplate | None:
-        if 0 <= self.current_round_idx < len(self.round_poses):
-            return self.round_poses[self.current_round_idx]
+        if self.current_round == 1:
+            if 0 <= self.current_round_idx < len(self.round_1_poses):
+                return self.round_1_poses[self.current_round_idx]
+        else:
+            if self.round_2_pool:
+                idx = self.current_round_idx % len(self.round_2_pool)
+                return self.round_2_pool[idx]
         return None
 
     @property
-    def round_number(self) -> int:
-        return self.current_round_idx + 1
-
-    @property
     def current_stage(self) -> int:
-        """Stage 1: Precision Blitz (Rounds 1-3), Stage 2: Speed Rush (Rounds 4-6)."""
-        if self.tournament_mode and self.round_number > STAGE_1_ROUNDS:
-            return 2
-        return 1
+        return self.current_round
 
     @property
     def current_stage_name(self) -> str:
-        return "SPEED RUSH" if self.current_stage == 2 else "PRECISION BLITZ"
+        return "SPEED RUSH" if self.current_round == 2 else "PRECISION BLITZ"
 
-    def previous_pose(self) -> BlazerPoseTemplate | None:
-        """Manually navigate to previous pose (practice/test mode)."""
-        if not self.round_poses:
-            return None
-        self.current_round_idx = (self.current_round_idx - 1) % len(self.round_poses)
-        self._reset_round_timers()
-        self.banner_msg = f"POSE {self.round_number}/{len(self.round_poses)}: STRIKE POSE!"
-        self.banner_color = (0, 220, 255)
-        return self.current_pose
+    @property
+    def round_number(self) -> int:
+        if self.current_round == 1:
+            return self.current_round_idx + 1
+        return self.r2_cleared + 1
 
-    def next_pose(self) -> BlazerPoseTemplate | None:
-        """Manually navigate to next pose (practice/test mode)."""
-        if not self.round_poses:
-            return None
-        self.current_round_idx = (self.current_round_idx + 1) % len(self.round_poses)
-        self._reset_round_timers()
-        self.banner_msg = f"POSE {self.round_number}/{len(self.round_poses)}: STRIKE POSE!"
-        self.banner_color = (0, 220, 255)
-        return self.current_pose
+    def start_game(self, player_id: str = "P001", rng: random.Random | None = None) -> None:
+        """Initialize a new tournament run with randomized poses."""
+        rand = rng or random.Random()
+        # Sample 10 poses for Round 1
+        self.round_1_poses = sample_game_poses(self.full_catalog, n=ROUND_1_POSES_COUNT, rng=rand)
+        # Pool for Round 2
+        r1_ids = {p.id for p in self.round_1_poses}
+        rem = [p for p in self.full_catalog if p.id not in r1_ids]
+        rand.shuffle(rem)
+        self.round_2_pool = rem if len(rem) >= 10 else list(self.full_catalog)
 
-    def _reset_round_timers(self) -> None:
-        """Apply stage-appropriate duration and reset round accumulators."""
-        if self.tournament_mode:
-            self.round_duration_s = STAGE_2_DURATION_S if self.current_stage == 2 else STAGE_1_DURATION_S
-        self.time_left_s = self.round_duration_s
-        self.hold_timer_s = 0.0
-        self.skip_hold_s = 0.0
+        self.current_round = 1
+        self.current_round_idx = 0
+        if not self.tournament_mode:
+            self.tournament_phase = BlazerTournamentPhase.ROUND_ACTIVE
+            self.time_left_s = self.round_duration_s
+        else:
+            self.tournament_phase = BlazerTournamentPhase.WAITING_FOR_PLAYER
+            self.time_left_s = ROUND_1_POSE_DURATION_S
+        self.round_2_timer_s = ROUND_2_GLOBAL_DURATION_S
+        self.pose_elapsed_s = 0.0
+
+        self.consecutive_skips = 0
+        self.total_skips = 0
+        self.perfections_count = 0
+        self.r1_cleared = 0
+        self.r2_cleared = 0
         self.is_pose_locked = False
         self.cooldown_timer_s = 0.0
 
-    def start_game(self, player_id: str = "P001", rng: random.Random | None = None) -> None:
-        """Start a new tournament run for a player with randomized poses."""
-        self.round_poses = sample_game_poses(self.full_catalog, n=self.total_rounds, rng=rng)
-        self.current_round_idx = 0
-        self.consecutive_skips = 0
-        self.total_skips = 0
-        self._reset_round_timers()
-
-        stage_name = self.current_stage_name
-        self.banner_msg = f"STAGE {self.current_stage}: {stage_name} — STRIKE POSE!"
+        self.banner_msg = "STEP INTO FRAME TO BEGIN"
         self.banner_color = (0, 220, 255)
         self.round_history.clear()
         self.last_match_result = None
@@ -232,11 +266,27 @@ class BlazerGameEngine:
             player_id=player_id,
             phase=Phase.PLAYING,
             score=0,
-            dodges=0,  # Passed count
-            hits=0,    # Missed count
+            dodges=0,
+            hits=0,
             streak=0,
-            time_left_s=self.round_duration_s * self.total_rounds,
+            time_left_s=self.time_left_s,
         )
+
+    def _reset_round_timers(self) -> None:
+        """Reset per-pose counters."""
+        self.hold_timer_s = 0.0
+        self.skip_hold_s = 0.0
+        self.pose_elapsed_s = 0.0
+        self.is_pose_locked = False
+        self.cooldown_timer_s = 0.0
+        if not self.tournament_mode:
+            self.time_left_s = self.round_duration_s
+        elif self.current_round == 1:
+            self.round_duration_s = ROUND_1_POSE_DURATION_S
+            self.time_left_s = ROUND_1_POSE_DURATION_S
+        else:
+            self.round_duration_s = ROUND_2_GLOBAL_DURATION_S
+            self.time_left_s = self.round_2_timer_s
 
     def update(
         self,
@@ -246,33 +296,78 @@ class BlazerGameEngine:
         player_head_norm: tuple[float, float] | None = None,
         player_landmarks_norm: Sequence[Sequence[float]] | None = None,
     ) -> tuple[GameState, BlazerPoseTemplate | None]:
-        """Advance tournament game state and accumulators by dt seconds."""
+        """Advance tournament lifecycle, countdowns, and pose evaluation."""
         dt = min(max(0.0, dt), 0.1)
 
         if self.state.phase != Phase.PLAYING:
             return self.state, self.current_pose
 
+        # ----------------------------------------------------------------------
+        # 1. Full-Body Presence Check
+        # ----------------------------------------------------------------------
+        in_frame = True
+        if player_landmarks_norm is not None:
+            in_frame = check_body_in_frame(player_landmarks_norm, pose.tracked)
+
+        if not in_frame:
+            self.banner_msg = "STEP INTO FRAME"
+            self.banner_color = (255, 180, 0)
+            self.hold_timer_s = 0.0
+            return self.state, self.current_pose
+
+        # Transition from Waiting to First Intermission upon body acquisition
+        if self.tournament_phase == BlazerTournamentPhase.WAITING_FOR_PLAYER:
+            self.tournament_phase = BlazerTournamentPhase.INTERMISSION
+            self.intermission_timer_s = INTERMISSION_DURATION_S
+            self.banner_msg = "ROUND 1: PRECISION BLITZ"
+            self.banner_color = (0, 230, 255)
+
+        # ----------------------------------------------------------------------
+        # 2. Intermission Phase (5.0s Rest & Ready Countdown)
+        # ----------------------------------------------------------------------
+        if self.tournament_phase == BlazerTournamentPhase.INTERMISSION:
+            self.intermission_timer_s -= dt
+            self.state.time_left_s = max(0.0, self.intermission_timer_s)
+            cd_s = int(math.ceil(self.intermission_timer_s))
+
+            if self.intermission_timer_s > 1.2:
+                r_title = "ROUND 1: PRECISION BLITZ" if self.current_round == 1 else "ROUND 2: SPEED RUSH"
+                self.banner_msg = f"{r_title} — STARTING IN {cd_s}..."
+                self.banner_color = (0, 230, 255) if self.current_round == 1 else (255, 170, 0)
+            else:
+                self.banner_msg = "STRIKE POSE!"
+                self.banner_color = (0, 255, 128)
+
+            if self.intermission_timer_s <= 0.0:
+                self.tournament_phase = BlazerTournamentPhase.ROUND_ACTIVE
+                self._reset_round_timers()
+                r_title = "ROUND 1: PRECISION BLITZ" if self.current_round == 1 else "ROUND 2: SPEED RUSH"
+                self.banner_msg = f"{r_title} — GO!"
+                self.banner_color = (0, 255, 128)
+
+            return self.state, self.current_pose
+
+        # ----------------------------------------------------------------------
+        # 3. Active Round Play
+        # ----------------------------------------------------------------------
         curr_pose = self.current_pose
         if curr_pose is None:
             self._finish_game()
             return self.state, None
 
-        # ----------------------------------------------------------------------
-        # 1. Cooldown Transition between Poses
-        # ----------------------------------------------------------------------
+        # Cooldown pause between poses
         if self.cooldown_timer_s > 0.0:
             self.cooldown_timer_s -= dt
             if self.cooldown_timer_s <= 0.0:
                 self._advance_to_next_pose()
             return self.state, self.current_pose
 
-        # ----------------------------------------------------------------------
-        # 2. Check Folded Arms Skip Gesture (1.0s non-blocking hold)
-        # ----------------------------------------------------------------------
+        # Folded Arms Skip Gesture
+        skip_req = ROUND_2_SKIP_HOLD_S if self.current_round == 2 else ROUND_1_SKIP_HOLD_S
         if is_arms_crossed(player_angles, player_landmarks_norm):
             self.skip_hold_s += dt
-            pct_held = int(min(100.0, (self.skip_hold_s / SKIP_HOLD_REQUIRED_S) * 100.0))
-            if self.skip_hold_s < SKIP_HOLD_REQUIRED_S:
+            pct_held = int(min(100.0, (self.skip_hold_s / skip_req) * 100.0))
+            if self.skip_hold_s < skip_req:
                 self.banner_msg = f"HOLDING TO SKIP... {pct_held}%"
                 self.banner_color = (255, 160, 0)
             else:
@@ -282,9 +377,7 @@ class BlazerGameEngine:
         else:
             self.skip_hold_s = max(0.0, self.skip_hold_s - dt * 2.5)
 
-        # ----------------------------------------------------------------------
-        # 3. Evaluate Live Player Pose
-        # ----------------------------------------------------------------------
+        # Evaluate Live Pose
         match_res = evaluate_blazer_pose(
             player_landmarks=player_angles or {},
             target_pose=curr_pose,
@@ -294,57 +387,85 @@ class BlazerGameEngine:
             check_head=self.check_head,
         )
         self.last_match_result = match_res
+        self.pose_elapsed_s += dt
 
         # ----------------------------------------------------------------------
-        # 4. Countdown Timer & Stage-Aware Hold Lock-in
+        # Round 1 Logic (Per-Pose 6.0s Timer, Quality Precision)
         # ----------------------------------------------------------------------
-        if self.timer_enabled:
-            self.time_left_s = max(0.0, self.time_left_s - dt)
-            time_taken_s = round(self.round_duration_s - self.time_left_s, 2)
+        if self.current_round == 1:
+            if self.timer_enabled:
+                if self.tournament_mode:
+                    self.round_duration_s = ROUND_1_POSE_DURATION_S
+                self.time_left_s = max(0.0, self.time_left_s - dt)
+                self.state.time_left_s = self.time_left_s
+            else:
+                self.time_left_s = self.round_duration_s
+
+            if match_res.is_matched and pose.tracked:
+                self.hold_timer_s += dt
+                if self.hold_timer_s >= ROUND_1_HOLD_S and not self.is_pose_locked:
+                    self.is_pose_locked = True
+                    self._record_success(self.pose_elapsed_s, match_res.match_pct)
+            else:
+                self.hold_timer_s = max(0.0, self.hold_timer_s - dt * 2.5)
+
+            # Round 1 Pose Timeout
+            if self.timer_enabled and self.time_left_s <= 0.0 and not self.is_pose_locked:
+                self._record_timeout(match_res.match_pct)
+
+        # ----------------------------------------------------------------------
+        # Round 2 Logic (Global 30.0s Speedrun Clock)
+        # ----------------------------------------------------------------------
         else:
-            self.time_left_s = self.round_duration_s
-            time_taken_s = 0.0
+            if self.timer_enabled:
+                self.round_2_timer_s = max(0.0, self.round_2_timer_s - dt)
+                self.round_duration_s = ROUND_2_GLOBAL_DURATION_S
+                self.time_left_s = self.round_2_timer_s
+                self.state.time_left_s = self.round_2_timer_s
+            else:
+                self.time_left_s = ROUND_2_GLOBAL_DURATION_S
 
-        required_hold = STAGE_2_HOLD_S if self.current_stage == 2 else (
-            STAGE_1_HOLD_S if self.tournament_mode else DEFAULT_HOLD_REQUIRED_S
-        )
+            if match_res.is_matched and pose.tracked:
+                self.hold_timer_s += dt
+                if self.hold_timer_s >= ROUND_2_HOLD_S and not self.is_pose_locked:
+                    self.is_pose_locked = True
+                    self._record_success(self.pose_elapsed_s, match_res.match_pct)
+            else:
+                self.hold_timer_s = max(0.0, self.hold_timer_s - dt * 2.5)
 
-        if match_res.is_matched and pose.tracked:
-            self.hold_timer_s += dt
-
-            # Lock-in upon holding required duration
-            if self.hold_timer_s >= required_hold and not self.is_pose_locked:
-                self.is_pose_locked = True
-                self._record_success(time_taken_s, match_res.match_pct)
-        else:
-            # Drain hold timer quickly if player drops pose
-            self.hold_timer_s = max(0.0, self.hold_timer_s - dt * 2.5)
-
-        # ----------------------------------------------------------------------
-        # 5. Check Timeout
-        # ----------------------------------------------------------------------
-        if self.timer_enabled and self.time_left_s <= 0.0 and not self.is_pose_locked:
-            self._record_timeout(match_res.match_pct)
+            # Round 2 Global Time Expiration
+            if self.timer_enabled and self.round_2_timer_s <= 0.0:
+                self._finish_game()
 
         return self.state, self.current_pose
 
     def _record_success(self, time_taken_s: float, match_pct: float) -> None:
-        """Handle a successful pose snap with stage-specific bonuses."""
-        self.consecutive_skips = 0  # Successful clear resets consecutive skip counter
+        """Handle successful snap with form or speed bonus (NO streak multiplier)."""
+        self.consecutive_skips = 0
 
-        if self.current_stage == 1:
-            # Stage 1: Precision Blitz rewards perfection (>= 85%) heavily
+        if self.current_round == 1:
+            # Round 1: Precision Blitz rewards posture >= 85% heavily
             speed_bonus = max(0, int(round(self.time_left_s * 15.0))) if self.timer_enabled else 0
-            perf_bonus = STAGE_1_PERFECTION_PTS if match_pct >= PERFECTION_THRESHOLD_PCT else 0
+            perf_bonus = ROUND_1_PERFECTION_PTS if match_pct >= ROUND_1_PERFECTION_THRESHOLD else 0
+            if perf_bonus > 0:
+                self.perfections_count += 1
+            earned = BASE_MATCH_SCORE + speed_bonus + perf_bonus
+            self.r1_cleared += 1
+            perf_tag = " [PERFECTION!]" if perf_bonus > 0 else ""
+            self.banner_msg = f"SNAP! LOCKED IN {time_taken_s:.1f}S (+{earned} PTS{perf_tag})"
+            self.cooldown_timer_s = DEFAULT_COOLDOWN_PAUSE_S
         else:
-            # Stage 2: Speed Rush rewards fast reflex snaps heavily
-            speed_bonus = max(0, int(round(self.time_left_s * STAGE_2_SPEED_MULT))) if self.timer_enabled else 0
-            perf_bonus = 50 if match_pct >= PERFECTION_THRESHOLD_PCT else 0
+            # Round 2: Speed Rush rewards fast reflex snap
+            speed_bonus = max(20, int(round(max(0.0, 3.5 - time_taken_s) * ROUND_2_SPEED_MULT))) if self.timer_enabled else 30
+            earned = BASE_MATCH_SCORE + speed_bonus
+            self.r2_cleared += 1
+            self.banner_msg = f"SNAP! FAST CLEAR (+{earned} PTS)"
+            # Instant advance in speedrun
+            self.cooldown_timer_s = 0.25
 
-        earned = BASE_MATCH_SCORE + speed_bonus + perf_bonus
         self.state.score += earned
         self.state.dodges += 1
-        self.state.streak += 1
+        self.banner_color = (0, 255, 128)
 
         curr_pose = self.current_pose
         if curr_pose:
@@ -354,29 +475,18 @@ class BlazerGameEngine:
                     pose_id=curr_pose.id,
                     pose_name=curr_pose.name,
                     matched=True,
-                    time_taken_s=time_taken_s,
+                    time_taken_s=round(time_taken_s, 2),
                     match_pct=match_pct,
                     score_earned=earned,
                     speed_bonus=speed_bonus,
                 )
             )
 
-        if self.timer_enabled:
-            perf_text = " [PERFECTION!]" if perf_bonus >= 100 else ""
-            self.banner_msg = f"SNAP! LOCKED IN {time_taken_s:.1f}s (+{earned} PTS{perf_text})"
-            self.banner_color = (50, 240, 100)
-            self.cooldown_timer_s = DEFAULT_COOLDOWN_PAUSE_S
-        else:
-            self.banner_msg = f"SNAP! MATCHED {int(match_pct)}% (PRESS [->] FOR NEXT)"
-            self.banner_color = (50, 240, 100)
-            self.cooldown_timer_s = 0.0
-
     def _record_skip(self) -> None:
-        """Handle a deliberate pose skip (folded arms held for 1.0s)."""
+        """Handle folded-arms skip gesture."""
         self.consecutive_skips += 1
         self.total_skips += 1
         self.state.hits += 1
-        self.state.streak = 0
 
         curr_pose = self.current_pose
         if curr_pose:
@@ -386,7 +496,7 @@ class BlazerGameEngine:
                     pose_id=curr_pose.id,
                     pose_name=curr_pose.name,
                     matched=False,
-                    time_taken_s=round(self.round_duration_s - self.time_left_s, 2),
+                    time_taken_s=round(self.pose_elapsed_s, 2),
                     match_pct=0.0,
                     score_earned=0,
                     speed_bonus=0,
@@ -394,22 +504,20 @@ class BlazerGameEngine:
                 )
             )
 
-        if self.consecutive_skips >= MAX_CONSECUTIVE_SKIPS:
+        if self.current_round == 1 and self.consecutive_skips >= MAX_CONSECUTIVE_SKIPS:
             self.state.phase = Phase.RESULT
             self.banner_msg = "ELIMINATED! (4 CONSECUTIVE SKIPS)"
             self.banner_color = (255, 40, 40)
             self.cooldown_timer_s = 0.0
         else:
-            remaining = MAX_CONSECUTIVE_SKIPS - self.consecutive_skips
-            self.banner_msg = f"SKIPPED! (0 PTS | {remaining} SKIPS LEFT BEFORE ELIMINATION)"
+            remaining = MAX_CONSECUTIVE_SKIPS - self.consecutive_skips if self.current_round == 1 else 99
+            self.banner_msg = f"SKIPPED! (0 PTS | {remaining} SKIPS LEFT)" if self.current_round == 1 else "SKIPPED! NEXT POSE"
             self.banner_color = (255, 140, 0)
-            self.cooldown_timer_s = DEFAULT_COOLDOWN_PAUSE_S
+            self.cooldown_timer_s = 0.4
 
     def _record_timeout(self, match_pct: float) -> None:
-        """Handle round time expiration."""
+        """Handle Round 1 per-pose timeout."""
         self.state.hits += 1
-        self.state.streak = 0
-
         curr_pose = self.current_pose
         if curr_pose:
             self.round_history.append(
@@ -424,24 +532,37 @@ class BlazerGameEngine:
                     speed_bonus=0,
                 )
             )
-
         self.banner_msg = "TIME OUT! MISS (0 PTS)"
         self.banner_color = (255, 40, 40)
         self.cooldown_timer_s = DEFAULT_COOLDOWN_PAUSE_S
 
     def _advance_to_next_pose(self) -> None:
-        """Advance to next pose card or finish tournament."""
+        """Advance to next pose card or transition to Round 2 / Finish."""
         self.current_round_idx += 1
-        if self.current_round_idx >= self.total_rounds:
-            self._finish_game()
+
+        if self.current_round == 1:
+            if self.current_round_idx >= len(self.round_1_poses):
+                # Transition to Round 2 Intermission!
+                self.current_round = 2
+                self.current_round_idx = 0
+                self.tournament_phase = BlazerTournamentPhase.INTERMISSION
+                self.intermission_timer_s = INTERMISSION_DURATION_S
+                self.banner_msg = "ROUND 1 COMPLETE! REST & PREPARE FOR SPEED RUSH"
+                self.banner_color = (255, 170, 0)
+                self._reset_round_timers()
+            else:
+                self._reset_round_timers()
+                self.banner_msg = f"POSE {self.round_number}/{len(self.round_1_poses)}: STRIKE POSE!"
+                self.banner_color = (0, 220, 255)
         else:
+            # Round 2: simply reset pose timers and present next pose
             self._reset_round_timers()
-            stage_name = self.current_stage_name
-            self.banner_msg = f"STAGE {self.current_stage}: {stage_name} (ROUND {self.round_number}/{self.total_rounds})"
-            self.banner_color = (0, 220, 255)
+            self.banner_msg = f"SPEED RUSH (CLEARED: {self.r2_cleared})"
+            self.banner_color = (255, 140, 0)
 
     def _finish_game(self) -> None:
-        """Conclude the tournament run and enter result phase."""
+        """End tournament and enter RESULT phase."""
         self.state.phase = Phase.RESULT
-        self.banner_msg = f"MATCH COMPLETE! FINAL SCORE: {self.state.score}"
+        self.tournament_phase = BlazerTournamentPhase.COMPLETED
+        self.banner_msg = f"TOURNAMENT ENDED! FINAL SCORE: {self.state.score}"
         self.banner_color = (255, 215, 0)

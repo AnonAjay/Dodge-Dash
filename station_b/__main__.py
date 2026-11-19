@@ -1,5 +1,6 @@
 """Entry point for Station B: Pose Blazer Tournament.
-Runs 2-Stage Tournament pose matching with real-time MediaPipe body tracking.
+Runs 2-Stage Tournament pose matching with real-time MediaPipe body tracking,
+retro 8-bit arcade visual effects, and in-memory synthesized chiptune audio feedback.
 
 Run from repo root:
     python -m station_b                    # Pose Blazer Tournament (Live Camera)
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import math
 import time
 import pygame
 
@@ -21,6 +23,7 @@ from station_b.keyboard_input import KeyboardWallPoseProvider
 from station_b.logic import BlazerGameEngine
 from station_b.outbox import enqueue_score
 from station_b.render import BlazerArenaRenderer
+from station_b.sounds import BlazerSoundManager
 
 
 def install_pose_tracker_hook() -> None:
@@ -55,6 +58,7 @@ def main() -> None:
     parser.add_argument("--player", type=str, default="P001", help="Player ID (default: P001)")
     parser.add_argument("--fullscreen", action="store_true", help="Launch in fullscreen mode")
     parser.add_argument("--rounds", type=int, default=6, help="Total rounds (default: 6)")
+    parser.add_argument("--no-voice", action="store_true", help="Disable text-to-speech announcer")
     args = parser.parse_args()
 
     # 1. Floor Calibration (used by mapper and camera thread)
@@ -80,6 +84,11 @@ def main() -> None:
 
     provider.start()
 
+    # 3. Audio & Announcer System
+    sounds = BlazerSoundManager(enable_voice=not args.no_voice)
+    sounds.play_game_start()
+    sounds.play_stage_start(1)
+
     clock = pygame.time.Clock()
     score_saved = False
 
@@ -87,6 +96,13 @@ def main() -> None:
     engine = BlazerGameEngine(total_rounds=args.rounds, tournament_mode=True)
     engine.start_game(player_id=args.player)
     renderer = BlazerArenaRenderer(fullscreen=args.fullscreen)
+
+    # Audio State Trackers
+    prev_locked = False
+    prev_skips = 0
+    prev_stage = 1
+    prev_phase = None
+    last_tick_sec = -1
 
     try:
         running = True
@@ -102,11 +118,14 @@ def main() -> None:
                     elif event.key == pygame.K_r:
                         engine.start_game(player_id=args.player)
                         score_saved = False
+                        prev_locked = False
+                        prev_skips = 0
+                        prev_stage = 1
+                        last_tick_sec = -1
+                        sounds.play_game_start()
+                        sounds.play_stage_start(1)
                     elif event.key in (pygame.K_F11, pygame.K_f):
                         renderer.toggle_fullscreen()
-                    elif event.key == pygame.K_h:
-                        engine.check_head = not engine.check_head
-                        engine.banner_msg = f"HEAD CHECK: {'ON' if engine.check_head else 'OFF'}"
 
             cam_frame = None
             debug_info = None
@@ -121,7 +140,7 @@ def main() -> None:
                     if cam_frame is not None:
                         ch, cw = cam_frame.shape[:2]
                         player_lms_norm = [
-                            [float(lm[0]) / cw, float(lm[1]) / ch]
+                            [float(lm[0]) / cw, float(lm[1]) / ch, float(lm[2]) if len(lm) > 2 else 1.0]
                             for lm in debug_info["landmarks_px"]
                         ]
                         lm0 = debug_info["landmarks_px"][0]
@@ -147,6 +166,50 @@ def main() -> None:
                 player_landmarks_norm=player_lms_norm,
             )
 
+            # Audio Events Dispatch
+            curr_tp = getattr(engine, "tournament_phase", None)
+
+            # 1. Intermission start announcement
+            if curr_tp == "intermission" and prev_phase != "intermission":
+                sounds.play_stage_start(engine.current_round)
+
+            # 2. Intermission countdown ticks (3, 2, 1)
+            if curr_tp == "intermission":
+                cd_s = int(math.ceil(engine.intermission_timer_s))
+                if 1 <= cd_s <= 3 and cd_s != last_tick_sec:
+                    sounds.play_tick()
+                    last_tick_sec = cd_s
+                elif cd_s > 3:
+                    last_tick_sec = -1
+
+            # 3. Pose Locked In
+            if engine.is_pose_locked and not prev_locked:
+                pct = engine.last_match_result.match_pct if engine.last_match_result else 0.0
+                if pct >= 85.0:
+                    sounds.play_perfection()
+                else:
+                    sounds.play_snap()
+            prev_locked = engine.is_pose_locked
+
+            # 4. Skip or Elimination
+            if engine.consecutive_skips > prev_skips:
+                if engine.consecutive_skips >= 4:
+                    sounds.play_disqualified()
+                else:
+                    sounds.play_skip()
+            prev_skips = engine.consecutive_skips
+
+            # 5. Round 2 Global Countdown final 5-second Ticks
+            if curr_tp == "active" and engine.current_round == 2:
+                r2_s = int(math.ceil(engine.round_2_timer_s))
+                if 1 <= r2_s <= 5 and r2_s != last_tick_sec:
+                    sounds.play_tick()
+                    last_tick_sec = r2_s
+                elif r2_s > 5:
+                    last_tick_sec = -1
+
+            prev_phase = curr_tp
+
             # Save score when tournament ends
             if state.phase == Phase.RESULT and not score_saved:
                 total_att = state.dodges + state.hits
@@ -165,6 +228,7 @@ def main() -> None:
                 )
                 enqueue_score(score_event)
                 score_saved = True
+                sounds.play_game_over()
                 print(f"[Station B] Tournament score saved to outbox: {state.score} pts")
 
             # Render Split HD UI
@@ -176,9 +240,11 @@ def main() -> None:
                 match_res=engine.last_match_result,
                 player_angles=player_angles,
                 fps=clock.get_fps(),
+                dt=dt,
             )
 
     finally:
+        sounds.stop_all()
         provider.stop()
         pygame.quit()
         print("[Station B] Closed cleanly.")

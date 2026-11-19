@@ -14,29 +14,29 @@ from pose_core.blazer_matcher import load_blazer_catalog
 
 def test_station_b_tournament_initialization():
     catalog = load_blazer_catalog("data/poses_index.json")
-    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=10, tournament_mode=True)
     engine.start_game("P001")
 
     assert engine.state.phase == Phase.PLAYING
     assert engine.state.score == 0
     assert engine.state.dodges == 0
     assert engine.state.hits == 0
-    assert engine.state.streak == 0
-    assert engine.round_number == 1
+    assert engine.current_round == 1
     assert engine.current_stage == 1
     assert engine.current_stage_name == "PRECISION BLITZ"
-    assert engine.time_left_s == STAGE_1_DURATION_S
+    assert engine.round_duration_s == STAGE_1_DURATION_S
 
 
 def test_station_b_precision_blitz_perfection_bonus():
     catalog = load_blazer_catalog("data/poses_index.json")
-    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=10, tournament_mode=True)
     engine.start_game("P001")
+    engine.tournament_phase = "active"
 
     pose = PoseFrame(tracked=True)
     matching_angles = dict(engine.current_pose.target_angles)
 
-    # Hold matching pose in Stage 1 for 0.4s
+    # Hold matching pose in Stage 1 for 0.4s (>= 0.35s required)
     for _ in range(4):
         engine.update(pose, dt=0.1, player_angles=matching_angles)
 
@@ -49,15 +49,14 @@ def test_station_b_precision_blitz_perfection_bonus():
 
 def test_station_b_speed_rush_progression():
     catalog = load_blazer_catalog("data/poses_index.json")
-    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=10, tournament_mode=True)
     engine.start_game("P001")
 
-    # Fast-forward to Round 4 (Stage 2: Speed Rush)
-    for r in range(1, 4):
-        engine.current_round_idx = r
-        engine._reset_round_timers()
+    # Transition to Round 2 (Speed Rush)
+    engine.current_round = 2
+    engine.tournament_phase = "active"
+    engine._reset_round_timers()
 
-    assert engine.round_number == 4
     assert engine.current_stage == 2
     assert engine.current_stage_name == "SPEED RUSH"
     assert engine.time_left_s == STAGE_2_DURATION_S
@@ -69,14 +68,14 @@ def test_station_b_speed_rush_progression():
         engine.update(pose, dt=0.1, player_angles=matching_angles)
 
     assert engine.is_pose_locked is True
-    # Fast snap with ~4.7s left awards massive speed bonus (~180 pts)
-    assert engine.state.score >= 250
+    assert engine.state.score >= 120
 
 
 def test_station_b_folded_arms_skip():
     catalog = load_blazer_catalog("data/poses_index.json")
-    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=10, tournament_mode=True)
     engine.start_game("P001")
+    engine.tournament_phase = "active"
 
     pose = PoseFrame(tracked=True)
     folded_angles = {
@@ -97,8 +96,10 @@ def test_station_b_folded_arms_skip():
 
 def test_station_b_elimination_after_4_skips():
     catalog = load_blazer_catalog("data/poses_index.json")
-    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=10, tournament_mode=True)
     engine.start_game("P001")
+    engine.tournament_phase = "active"
+
 
     pose = PoseFrame(tracked=True)
     folded_angles = {
@@ -146,3 +147,68 @@ def test_station_b_score_event_contract():
     assert score_event.station == "B"
     assert score_event.game == "blazer"
     assert score_event.score == 850
+
+
+def test_station_b_arena_renderer_headless():
+    """Verify BlazerArenaRenderer renders HUD, AR canvas, and Result overlays safely."""
+    import os
+    import numpy as np
+    os.environ["SDL_VIDEODRIVER"] = "dummy"
+
+    from station_b.render import BlazerArenaRenderer, render_pixel_text
+    renderer = BlazerArenaRenderer(width=800, height=600, fullscreen=False)
+
+    catalog = load_blazer_catalog("data/poses_index.json")
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
+    engine.start_game("P001")
+
+    # Render PLAYING frame with dummy camera
+    dummy_cam = np.zeros((480, 640, 3), dtype=np.uint8)
+    renderer.draw(
+        state=engine.state,
+        engine=engine,
+        cam_frame=dummy_cam,
+        fps=60.0,
+        dt=0.016,
+    )
+
+    # Render RESULT frame
+    engine._finish_game()
+    renderer.draw(
+        state=engine.state,
+        engine=engine,
+        cam_frame=None,
+        fps=60.0,
+        dt=0.016,
+    )
+
+
+def test_station_b_body_visibility_gate():
+    """Verify game pauses and displays 'STEP INTO FRAME' when player is partially out of bounds."""
+    from station_b.logic import check_body_in_frame
+    catalog = load_blazer_catalog("data/poses_index.json")
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
+    engine.start_game("P001")
+
+    # Incomplete / occluded landmarks (only 10 points)
+    incomplete_lms = [[0.5, 0.5, 0.9]] * 10
+    assert check_body_in_frame(incomplete_lms, tracked=True) is False
+
+    # Low visibility on knees
+    valid_lms = [[0.5, 0.5, 0.9]] * 33
+    valid_lms[25] = [0.5, 0.5, 0.1]  # Left knee occluded/out of frame
+    assert check_body_in_frame(valid_lms, tracked=True) is False
+
+    # Fully visible landmarks
+    all_good_lms = [[0.5, 0.5, 0.95]] * 33
+    assert check_body_in_frame(all_good_lms, tracked=True) is True
+
+    # When update receives occluded body, it pauses countdown and sets banner
+    initial_time = engine.time_left_s
+    pose = PoseFrame(tracked=True)
+    engine.update(pose, dt=0.5, player_landmarks_norm=valid_lms)
+
+    assert "STEP INTO FRAME" in engine.banner_msg
+    assert engine.time_left_s == initial_time  # Clock was paused!
+
+

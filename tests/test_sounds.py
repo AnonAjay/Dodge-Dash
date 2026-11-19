@@ -104,3 +104,49 @@ def test_stop_all_drains_voice_queue():
     mgr._voice_queue.put("Test Phrase 2")
     mgr.stop_all()
     assert mgr._voice_queue.empty()
+
+
+def test_blazer_sound_manager_initialization_and_playback():
+    """Verify Station B BlazerSoundManager synthesizes specialized sounds."""
+    from station_b.sounds import BlazerSoundManager
+    mgr = BlazerSoundManager(enable_voice=False)
+    if mgr.enabled:
+        assert "pose_snap" in mgr.sounds
+        assert "perfection" in mgr.sounds
+        assert "pose_skip" in mgr.sounds
+        assert "tick" in mgr.sounds
+        assert "disqualified" in mgr.sounds
+
+    # Calling play methods must never crash
+    mgr.play_snap()
+    mgr.play_perfection()
+    mgr.play_skip()
+    mgr.play_tick()
+    mgr.play_disqualified()
+    mgr.play_stage_start(1)
+    mgr.play_stage_start(2)
+    mgr.stop_all()
+
+
+def test_blazer_sound_manager_speech_callouts():
+    """Verify Station B BlazerSoundManager dispatches appropriate speech callouts."""
+    from station_b.sounds import BlazerSoundManager
+    mgr = BlazerSoundManager(enable_voice=True)
+    mock_speak = MagicMock()
+    mgr.speak = mock_speak
+
+    mgr.play_perfection()
+    mock_speak.assert_called_with("Perfection!")
+
+    mgr.play_skip()
+    mock_speak.assert_called_with("Skipped!")
+
+    mgr.play_disqualified()
+    mock_speak.assert_called_with("Disqualified!")
+
+    mgr.play_stage_start(1)
+    mock_speak.assert_called_with("Stage 1! Precision Blitz!")
+
+    mgr.play_stage_start(2)
+    mock_speak.assert_called_with("Stage 2! Speed Rush!")
+

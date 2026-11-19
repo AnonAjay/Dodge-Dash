@@ -1160,39 +1160,73 @@ class LavaArenaRenderer:
         # ======================================================================
         if state.phase == Phase.RESULT:
             overlay = pygame.Surface((win_w, win_h), pygame.SRCALPHA)
-            overlay.fill((14, 8, 28, 210))
+            overlay.fill((8, 10, 16, 245))
             self.screen.blit(overlay, (0, 0))
 
-            card_w = min(win_w - 60, 760)
-            card_h = min(win_h - 80, 440)
-            card_x = (win_w - card_w) // 2
-            card_y = (win_h - card_h) // 2
+            # Upper Big Heading (H1)
+            over_title = render_pixel_text(
+                "TOURNAMENT ENDED",
+                scale=5,
+                top_color=(255, 224, 51),
+                bottom_color=(232, 56, 24),
+                shadow_offset=5,
+            )
+            self.screen.blit(over_title, over_title.get_rect(center=(win_w // 2, int(win_h * 0.16))))
 
-            card_surf = pygame.Surface((card_w, card_h), pygame.SRCALPHA)
-            card_surf.fill((20, 11, 42, 225))
-            self.screen.blit(card_surf, (card_x, card_y))
+            # Center Hero: Final Score (H2)
+            score_str = f"FINAL SCORE: {state.score:04d} PTS"
+            final_score = render_pixel_text(
+                score_str,
+                scale=5,
+                top_color=(0, 240, 255),
+                bottom_color=(0, 140, 255),
+                shadow_offset=4,
+            )
+            self.screen.blit(final_score, final_score.get_rect(center=(win_w // 2, int(win_h * 0.36))))
 
-            # Glowing neon gold & coral border
-            pygame.draw.rect(self.screen, (255, 209, 82), (card_x, card_y, card_w, card_h), width=3)
-            pygame.draw.rect(self.screen, (232, 56, 24), (card_x + 3, card_y + 3, card_w - 6, card_h - 6), width=1)
+            # Center Hero: Titan Rank (H3)
+            if state.score >= 1200:
+                rank_str, r_top, r_bot = "TITAN RANK: S+ (IMMORTAL LAVA MASTER)", (255, 220, 50), (255, 120, 0)
+            elif state.score >= 700:
+                rank_str, r_top, r_bot = "TITAN RANK: A (NIMBLE LAVA DRIFTER)", (0, 255, 128), (0, 160, 70)
+            elif state.score >= 350:
+                rank_str, r_top, r_bot = "TITAN RANK: B (AGILE HOPPER)", (0, 220, 255), (0, 130, 220)
+            else:
+                rank_str, r_top, r_bot = "TITAN RANK: C (CRISP NOVICE)", (255, 140, 30), (200, 60, 20)
 
-            center_x = win_w // 2
+            rank_surf = render_pixel_text(rank_str, scale=3, top_color=r_top, bottom_color=r_bot, shadow_offset=3)
+            self.screen.blit(rank_surf, rank_surf.get_rect(center=(win_w // 2, int(win_h * 0.48))))
 
-            over_title = render_pixel_text("ROUND OVER!", scale=5, top_color=(255, 224, 51), bottom_color=(232, 56, 24), shadow_offset=4)
-            self.screen.blit(over_title, over_title.get_rect(center=(center_x, card_y + 60)))
+            # Beneath Center: Performance Statistics
+            total_act = state.dodges + state.hits
+            acc = int(round((state.dodges / max(1, total_act)) * 100))
+            stats_str = f"ROUNDS: {current_round}/3   |   DODGES: {state.dodges}   |   ACCURACY: {acc}%   |   STREAK: {state.best_streak}"
+            stats_surf = render_pixel_text(
+                stats_str,
+                scale=2,
+                top_color=(220, 230, 245),
+                bottom_color=(140, 155, 180),
+                shadow_offset=2,
+            )
+            self.screen.blit(stats_surf, stats_surf.get_rect(center=(win_w // 2, int(win_h * 0.59))))
 
-            final_score = render_pixel_text(f"FINAL SCORE: {state.score:04d}", scale=4, top_color=(255, 255, 255), bottom_color=(200, 220, 255), shadow_offset=3)
-            self.screen.blit(final_score, final_score.get_rect(center=(center_x, card_y + 140)))
+            # Highlighted Buttons: Bottom-Left (Retry) and Bottom-Right (Exit)
+            btn_w, btn_h = 240, 50
+            bl_x, bl_y = 40, win_h - btn_h - 26
+            bl_surf = pygame.Surface((btn_w, btn_h), pygame.SRCALPHA)
+            bl_surf.fill((10, 36, 22, 230))
+            self.screen.blit(bl_surf, (bl_x, bl_y))
+            pygame.draw.rect(self.screen, (0, 255, 128), (bl_x, bl_y, btn_w, btn_h), 2, border_radius=4)
+            r_prompt = render_pixel_text("[R] PLAY AGAIN", scale=2, top_color=(0, 255, 128), bottom_color=(0, 170, 70), shadow_offset=2)
+            self.screen.blit(r_prompt, r_prompt.get_rect(center=(bl_x + btn_w // 2, bl_y + btn_h // 2)))
 
-            stats_str = f"DODGES: {state.dodges}   HITS: {state.hits}   BEST STREAK: {state.best_streak}"
-            stats_surf = render_pixel_text(stats_str, scale=2, top_color=(100, 240, 255), bottom_color=(20, 160, 255), shadow_offset=2)
-            self.screen.blit(stats_surf, stats_surf.get_rect(center=(center_x, card_y + 210)))
-
-            claim_surf = render_pixel_text("VISIT DESK TO CLAIM YOUR PHOTOCARD!", scale=2, top_color=(255, 224, 51), bottom_color=(255, 140, 20), shadow_offset=2)
-            self.screen.blit(claim_surf, claim_surf.get_rect(center=(center_x, card_y + 280)))
-
-            prompt_surf = render_pixel_text("[R] PLAY AGAIN   |   [ESC] EXIT", scale=2, top_color=(80, 255, 160), bottom_color=(0, 200, 100), shadow_offset=2)
-            self.screen.blit(prompt_surf, prompt_surf.get_rect(center=(center_x, card_y + 360)))
+            br_x, br_y = win_w - btn_w - 40, win_h - btn_h - 26
+            br_surf = pygame.Surface((btn_w, btn_h), pygame.SRCALPHA)
+            br_surf.fill((38, 12, 16, 230))
+            self.screen.blit(br_surf, (br_x, br_y))
+            pygame.draw.rect(self.screen, (255, 60, 60), (br_x, br_y, btn_w, btn_h), 2, border_radius=4)
+            esc_prompt = render_pixel_text("[ESC] EXIT", scale=2, top_color=(255, 70, 70), bottom_color=(190, 20, 20), shadow_offset=2)
+            self.screen.blit(esc_prompt, esc_prompt.get_rect(center=(br_x + btn_w // 2, br_y + btn_h // 2)))
 
         pygame.display.flip()
 
