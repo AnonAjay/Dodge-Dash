@@ -24,13 +24,14 @@ import pygame
 from pose_core.floor_map import FloorMapper
 from shared.contracts import GameState, Phase, PoseFrame
 from station_a.logic import GRID_SIZE, LavaWave, get_streak_multiplier
+from station_a.sounds import ArcadeSoundManager
 
 # Base Window Geometry
 DEFAULT_WIDTH = 1024
 DEFAULT_HEIGHT = 768
 HUD_TOP_H = 76
-HUD_BOT_H = 50
-DEFAULT_ROUND_DURATION_S = 60.0
+HUD_BOT_H = 0
+DEFAULT_ROUND_DURATION_S = 30.0
 
 # ==============================================================================
 # RETRO 8-BIT PIXEL BITMAP FONT RENDERER (TITANS' ARCADE)
@@ -55,6 +56,7 @@ PIXEL_GLYPHS: dict[str, list[str]] = {
     "Q": [" ### ", "#   #", "#   #", "#   #", "# # #", "#  ##", " ####"],
     "R": ["#### ", "#   #", "#   #", "#### ", "#  # ", "#   #", "#   #"],
     "S": [" ####", "#    ", "#    ", " ### ", "    #", "    #", "#### "],
+    "s": ["     ", "     ", "#### ", "#    ", "#### ", "    #", "#### "],
     "T": ["#####", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  "],
     "U": ["#   #", "#   #", "#   #", "#   #", "#   #", "#   #", " ### "],
     "V": ["#   #", "#   #", "#   #", "#   #", "#   #", " # # ", "  #  "],
@@ -111,10 +113,14 @@ def render_pixel_text(
     if cache_key in _PIXEL_TEXT_CACHE:
         return _PIXEL_TEXT_CACHE[cache_key]
 
-    up_text = text.upper()
     cols = []
-    for ch in up_text:
-        glyph = PIXEL_GLYPHS.get(ch, PIXEL_GLYPHS["?"])
+    for ch in text:
+        if ch in PIXEL_GLYPHS:
+            glyph = PIXEL_GLYPHS[ch]
+        elif ch.upper() in PIXEL_GLYPHS:
+            glyph = PIXEL_GLYPHS[ch.upper()]
+        else:
+            glyph = PIXEL_GLYPHS["?"]
         gw = len(glyph[0])
         cols.append((glyph, gw))
 
@@ -459,7 +465,8 @@ class LavaArenaRenderer:
 
     def __init__(self, mapper: FloorMapper | None = None,
                  arena_w_m: float = 1.8, arena_h_m: float = 1.8,
-                 fullscreen: bool = False):
+                 fullscreen: bool = False,
+                 enable_voice: bool = True):
         install_pose_tracker_hook()
         pygame.init()
         pygame.font.init()
@@ -505,6 +512,22 @@ class LavaArenaRenderer:
 
         self.start_time = time.time()
         self.last_frame_time = time.time()
+
+        # Ephemeral Floating Toast System
+        self.toast_msg: str = ""
+        self.toast_color: tuple[int, int, int] = TEXT_GOLD
+        self.toast_timer: float = 0.0
+        self.toast_max_duration: float = 1.4
+        self.last_seen_banner_msg: str = ""
+        self.last_dodges: int = 0
+        self.last_hits: int = 0
+
+        # Retro 8-Bit Arcade Sound Manager & State Tracking
+        self.sound_mgr = ArcadeSoundManager(enable_voice=enable_voice)
+        self._prev_phase: Phase | None = None
+        self._last_round_announced: int = 0
+        self._game_over_sound_played: bool = False
+        self._prev_time_left_s: float = 0.0
 
     def _maximize_window(self) -> None:
         """Maximize the Pygame window using Windows OS API."""
@@ -865,6 +888,50 @@ class LavaArenaRenderer:
         self.screen.fill((16, 18, 22))
 
         # ======================================================================
+        # 0. RETRO 8-BIT ARCADE SOUND STATE TRANSITIONS
+        # ======================================================================
+        is_playing = (state.phase == Phase.PLAYING)
+        was_playing = (self._prev_phase == Phase.PLAYING)
+
+        # Detect [R] restart while staying in Phase.PLAYING (round 1 reset with score 0)
+        is_restarted = (
+            is_playing
+            and was_playing
+            and current_round == 1
+            and state.score == 0
+            and state.time_left_s > self._prev_time_left_s + 5.0
+        )
+
+        if (is_playing and not was_playing) or is_restarted:
+            self.sound_mgr.play_game_start()
+            self._last_round_announced = 0
+            self._game_over_sound_played = False
+
+        # Round announcements: when round popup card triggers (round_timer > 0 or is_resting)
+        if (round_timer > 0.0 or is_resting) and round_title:
+            up_title = round_title.upper()
+            if "ROUND 1" in up_title and self._last_round_announced < 1:
+                self.sound_mgr.play_round_start(1)
+                self._last_round_announced = 1
+            elif "ROUND 2" in up_title and self._last_round_announced < 2:
+                self.sound_mgr.play_round_start(2)
+                self._last_round_announced = 2
+            elif ("ROUND 3" in up_title or "FINAL" in up_title) and self._last_round_announced < 3:
+                self.sound_mgr.play_round_start(3)
+                self._last_round_announced = 3
+
+        # Game Over: Transition into Phase.RESULT
+        if state.phase == Phase.RESULT:
+            if not self._game_over_sound_played:
+                self.sound_mgr.play_game_over()
+                self._game_over_sound_played = True
+        else:
+            self._game_over_sound_played = False
+
+        self._prev_phase = state.phase
+        self._prev_time_left_s = state.time_left_s
+
+        # ======================================================================
         # 1. RENDER BACKGROUND (AR CAMERA FEED OR VIRTUAL ARENA)
         # ======================================================================
         if cam_frame is not None:
@@ -909,136 +976,184 @@ class LavaArenaRenderer:
             self.screen.blit(arena_surf, (0, 0))
 
         # ======================================================================
-        # 2. TOP HUD (SCORE, MULTIPLIER, STREAK, TIMER, ROUND BADGE)
+        # 2. TOP HUD (DECLUTTERED SUNSET ARCADE HUD BAR)
         # ======================================================================
         hud_surface = pygame.Surface((win_w, HUD_TOP_H), pygame.SRCALPHA)
-        hud_surface.fill((22, 12, 46, 195))
+        hud_surface.fill((22, 12, 46, 210))  # Translucent twilight purple
         self.screen.blit(hud_surface, (0, 0))
-        # Glowing neon gold & coral borders
-        pygame.draw.line(self.screen, (255, 209, 82), (0, HUD_TOP_H), (win_w, HUD_TOP_H), 2)
-        pygame.draw.line(self.screen, (232, 56, 24, 120), (0, HUD_TOP_H - 1), (win_w, HUD_TOP_H - 1), 1)
+        # Crisp 2px glowing coral-pink / gold bottom border (#ff4d6d / #ffbe0b)
+        pygame.draw.line(self.screen, (255, 77, 109), (0, HUD_TOP_H - 2), (win_w, HUD_TOP_H - 2), 1)
+        pygame.draw.line(self.screen, (255, 190, 11), (0, HUD_TOP_H - 1), (win_w, HUD_TOP_H - 1), 1)
 
-        # Top-Left: FLOOR IS LAVA (signature two-tone sunset pixel font)
-        title_surf = render_pixel_text("FLOOR IS LAVA", scale=3, top_color=(255, 224, 51), bottom_color=(232, 56, 24))
-        self.screen.blit(title_surf, (20, 10))
+        # ----------------------------------------------------------------------
+        # Left Section (Clean Event Branding)
+        # Show ONLY TITANS' ARCADE in distinct neon cyan-to-mint gradient
+        # (#00F5D4 top -> #38EF7D bottom, outline #140A24)
+        # ----------------------------------------------------------------------
+        titans_scale = 3 if win_w >= 950 else 2
+        titans_surf = render_pixel_text(
+            "TITANS' ARCADE",
+            scale=titans_scale,
+            top_color=(0, 245, 212),       # #00F5D4 (neon cyan)
+            bottom_color=(56, 239, 125),   # #38EF7D (mint green)
+            outline_color=(20, 10, 36),    # #140A24
+            shadow_offset=2,
+        )
+        self.screen.blit(titans_surf, titans_surf.get_rect(midleft=(24, HUD_TOP_H // 2)))
 
-        # Subtitle: Round archetype & status in retro pixel font
-        if is_resting:
-            round_label = f"ROUND {current_round}/3" if current_round < 3 else "FINAL ROUND"
-            badge_str = f"TITANS' ARCADE | {round_label} (RESTING) | PREPARE"
-            badge_top, badge_bot = (0, 240, 255), (0, 180, 210)
-        elif current_round == 1:
-            badge_str = "TITANS' ARCADE | ROUND 1/3 (RIVERS) | 5S PACING"
-            badge_top, badge_bot = (100, 245, 220), (0, 195, 175)
-        elif current_round == 2:
-            badge_str = "TITANS' ARCADE | ROUND 2/3 (CIRCLES) | 4S PACING"
-            badge_top, badge_bot = (255, 220, 100), (235, 140, 40)
-        else:
-            badge_str = "TITANS' ARCADE | FINAL ROUND (BRIDGES) | 3S PACING"
-            badge_top, badge_bot = (255, 120, 120), (230, 50, 50)
-        badge_surf = render_pixel_text(badge_str, scale=2, top_color=badge_top, bottom_color=badge_bot, shadow_offset=2)
-        self.screen.blit(badge_surf, (20, 46))
+        # ----------------------------------------------------------------------
+        # Center Section (Prominent Game Title Only)
+        # Show ONLY centered FLOOR IS LAVA (Scale 4 Two-Tone golden-yellow/crimson)
+        # ----------------------------------------------------------------------
+        center_scale = 3 if win_w < 950 else 4
+        center_title = render_pixel_text(
+            "FLOOR IS LAVA",
+            scale=center_scale,
+            top_color=(255, 224, 51),     # #FFE033 (golden-yellow)
+            bottom_color=(232, 56, 24),    # #E83818 (crimson/red-orange)
+            outline_color=(20, 10, 36),    # #140A24
+            shadow_offset=3,
+        )
+        self.screen.blit(center_title, center_title.get_rect(center=(win_w // 2, HUD_TOP_H // 2)))
 
-        # Top-Center: SCORE: 0000 in two-tone gold/orange pixel font
-        score_surf = render_pixel_text(f"SCORE: {state.score:04d}", scale=3, top_color=(255, 224, 51), bottom_color=(255, 140, 20))
-        score_x = max(title_surf.get_width() + 35, win_w // 2 - score_surf.get_width() // 2)
-        self.screen.blit(score_surf, (score_x, 10))
-
-        # Streak, Dodges & Hits info strip
-        mult = get_streak_multiplier(state.streak)
-        streak_str = f"STREAK: {state.streak} (X{mult:.1f})  |  DODGES: {state.dodges}  |  HITS: {state.hits}"
-        streak_top = (255, 220, 100) if state.streak > 0 else (170, 185, 210)
-        streak_bot = (235, 140, 40) if state.streak > 0 else (120, 135, 160)
-        streak_surf = render_pixel_text(streak_str, scale=2, top_color=streak_top, bottom_color=streak_bot, shadow_offset=2)
-        streak_x = max(title_surf.get_width() + 35, win_w // 2 - streak_surf.get_width() // 2)
-        self.screen.blit(streak_surf, (streak_x, 46))
-
-        # Top-Right: Countdown Timer & Gauge (normalized to 60.0s round duration)
+        # ----------------------------------------------------------------------
+        # Right Section (Score & Timer + Horizontal Gauge Bar)
+        # Top: SCORE: 0000 + 30s | Bottom: Horizontal Gauge Bar normalized to 30.0s
+        # ----------------------------------------------------------------------
         secs = max(0, int(math.ceil(state.time_left_s)))
-        if secs <= 10:
-            time_top = (255, 224, 51)
+        if secs <= 8:
+            time_top = (255, 77, 109)  # #ff4d6d (pulsing coral-red)
             time_bot = (232, 56, 24)
-            bar_fill = (232, 56, 24)
+            bar_fill = (255, 77, 109)
         else:
-            time_top = (100, 240, 255)
-            time_bot = (20, 140, 255)
-            bar_fill = (0, 220, 255)
+            time_top = (0, 245, 212)   # #00f5d4 (neon cyan)
+            time_bot = (0, 180, 210)
+            bar_fill = (0, 245, 212)
 
-        timer_surf = render_pixel_text(f"{secs:02d}S", scale=3, top_color=time_top, bottom_color=time_bot)
-        t_x = win_w - timer_surf.get_width() - 24
-        self.screen.blit(timer_surf, (t_x, 10))
+        timer_surf = render_pixel_text(f"{secs:02d}s", scale=3, top_color=time_top, bottom_color=time_bot)
+        score_surf = render_pixel_text(f"SCORE: {state.score:04d}", scale=3, top_color=(255, 224, 51), bottom_color=(255, 140, 20))
 
-        # Glowing neon timer gauge bar
-        bar_w = 90
+        right_m = 24
+        timer_x = win_w - right_m - timer_surf.get_width()
+        score_x = timer_x - score_surf.get_width() - 18
+        self.screen.blit(timer_surf, (timer_x, 12))
+        self.screen.blit(score_surf, (score_x, 12))
+
+        # Horizontal timer gauge bar directly underneath matching score/timer width
+        bar_x = score_x
+        bar_w = (win_w - right_m) - bar_x
+        bar_y = 52
         bar_h = 8
         pct = max(0.0, min(1.0, state.time_left_s / DEFAULT_ROUND_DURATION_S))
-        bar_x = win_w - bar_w - 24
-        bar_y = 48
-        pygame.draw.rect(self.screen, (35, 18, 65), (bar_x, bar_y, bar_w, bar_h))
+        pygame.draw.rect(self.screen, (35, 18, 65), (bar_x, bar_y, bar_w, bar_h), border_radius=4)
         if pct > 0:
-            pygame.draw.rect(self.screen, bar_fill, (bar_x, bar_y, int(bar_w * pct), bar_h))
-        pygame.draw.rect(self.screen, (255, 209, 82), (bar_x, bar_y, bar_w, bar_h), width=1)
+            fill_w = max(4, int(bar_w * pct))
+            pygame.draw.rect(self.screen, bar_fill, (bar_x, bar_y, fill_w, bar_h), border_radius=4)
+        pygame.draw.rect(self.screen, (255, 190, 11), (bar_x, bar_y, bar_w, bar_h), width=1, border_radius=4)
 
         # ======================================================================
-        # 3. CENTER-SCREEN STREET FIGHTER ARCADE ROUND BANNER
+        # 3. CENTER-SCREEN COMPACT ROUND ANNOUNCEMENT CARD
         # ======================================================================
         if (round_timer > 0.0 or is_resting) and round_title:
-            cy = win_h // 2
-            band_h = 140
-            band_surface = pygame.Surface((win_w, band_h), pygame.SRCALPHA)
-            band_surface.fill((18, 10, 38, 220))
-            self.screen.blit(band_surface, (0, cy - band_h // 2))
+            card_w = 360
+            card_h = 240
+            card_x = (win_w - card_w) // 2
+            card_y = (win_h - card_h) // 2
 
-            # Double neon horizontal borders
-            pygame.draw.line(self.screen, (255, 209, 82), (0, cy - band_h // 2), (win_w, cy - band_h // 2), 2)
-            pygame.draw.line(self.screen, round_color, (0, cy - band_h // 2 + 3), (win_w, cy - band_h // 2 + 3), 1)
-            pygame.draw.line(self.screen, round_color, (0, cy + band_h // 2 - 3), (win_w, cy + band_h // 2 - 3), 1)
-            pygame.draw.line(self.screen, (255, 209, 82), (0, cy + band_h // 2), (win_w, cy + band_h // 2), 2)
+            card_surf = pygame.Surface((card_w, card_h), pygame.SRCALPHA)
+            card_surf.fill((22, 12, 46, 230))  # Semi-translucent dark twilight purple
+            self.screen.blit(card_surf, (card_x, card_y))
 
-            # Huge Street Fighter Style Title
-            t_surf = render_pixel_text(round_title, scale=5, top_color=(255, 224, 51), bottom_color=(232, 56, 24), shadow_offset=4)
-            t_rect = t_surf.get_rect(center=(win_w // 2, cy - 22))
+            # Crisp 2px double glowing neon coral-gold border (#ff4d6d / #ffbe0b)
+            pygame.draw.rect(self.screen, (255, 190, 11), (card_x, card_y, card_w, card_h), width=2, border_radius=10)
+            pygame.draw.rect(self.screen, (255, 77, 109), (card_x + 3, card_y + 3, card_w - 6, card_h - 6), width=1, border_radius=8)
+
+            # Centered large 8-bit title in golden-yellow / red-orange
+            t_surf = render_pixel_text(round_title, scale=4, top_color=(255, 224, 51), bottom_color=(232, 56, 24), shadow_offset=3)
+            t_rect = t_surf.get_rect(center=(win_w // 2, card_y + 80))
             self.screen.blit(t_surf, t_rect)
 
+            # Compact subtitle underneath in mint green / white
             if round_sub:
-                s_surf = render_pixel_text(round_sub, scale=3, top_color=(245, 248, 255), bottom_color=(175, 195, 230), shadow_offset=2)
-                s_rect = s_surf.get_rect(center=(win_w // 2, cy + 32))
+                s_surf = render_pixel_text(round_sub, scale=2, top_color=(56, 239, 125), bottom_color=(245, 248, 255), shadow_offset=2)
+                s_rect = s_surf.get_rect(center=(win_w // 2, card_y + 160))
                 self.screen.blit(s_surf, s_rect)
 
         # ======================================================================
-        # 4. BOTTOM EVENT BANNER & STATUS STRIP
+        # 4. EPHEMERAL FLOATING ARCADE TOAST PILL
         # ======================================================================
-        bot_surface = pygame.Surface((win_w, HUD_BOT_H), pygame.SRCALPHA)
-        bot_surface.fill((22, 12, 46, 195))
-        self.screen.blit(bot_surface, (0, win_h - HUD_BOT_H))
-        pygame.draw.line(self.screen, (255, 209, 82), (0, win_h - HUD_BOT_H), (win_w, win_h - HUD_BOT_H), 2)
-        pygame.draw.line(self.screen, (232, 56, 24, 120), (0, win_h - HUD_BOT_H + 1), (win_w, win_h - HUD_BOT_H + 1), 1)
+        if banner_msg and (
+            banner_msg != self.last_seen_banner_msg
+            or state.dodges != self.last_dodges
+            or state.hits != self.last_hits
+        ):
+            self.toast_msg = banner_msg
+            self.toast_color = banner_color
+            self.toast_timer = 1.4
+            self.toast_max_duration = 1.4
+            self.last_seen_banner_msg = banner_msg
+            self.last_dodges = state.dodges
+            self.last_hits = state.hits
 
-        if banner_msg:
-            msg_up = banner_msg.upper()
-            if any(k in msg_up for k in ("SAFE", "DODGED", "IMMUNITY", "BONUS")):
-                top_col = (80, 255, 160)
+        if self.toast_timer > 0.0:
+            self.toast_timer = max(0.0, self.toast_timer - dt)
+            if self.toast_timer <= 0.0:
+                self.toast_msg = ""
+
+        active_toast = self.toast_msg
+        active_col = self.toast_color
+        is_airborne_toast = False
+
+        if not active_toast and pose.airborne:
+            active_toast = "AIRBORNE! JUMP IMMUNITY!"
+            active_col = (0, 245, 212)
+            is_airborne_toast = True
+
+        if active_toast:
+            msg_up = active_toast.upper()
+            if any(k in msg_up for k in ("SAFE", "DODGED", "IMMUNITY", "BONUS", "LOCKED")):
+                top_col = (56, 239, 125)    # mint green #38ef7d
                 bot_col = (0, 200, 100)
-            elif any(k in msg_up for k in ("HIT", "BURNT", "LAVA", "WARNING", "DANGER")):
-                top_col = (255, 224, 51)
-                bot_col = (232, 56, 24)
+                border_col = (56, 239, 125)
+            elif any(k in msg_up for k in ("HIT", "BURNT", "LAVA", "WARNING", "DANGER", "HEATING")):
+                top_col = (255, 224, 51)    # golden-yellow #ffe033
+                bot_col = (232, 56, 24)     # red-orange #e83818
+                border_col = (255, 77, 109) # coral-pink #ff4d6d
+            elif any(k in msg_up for k in ("AIRBORNE", "JUMP")):
+                top_col = (0, 245, 212)     # neon cyan #00f5d4
+                bot_col = (0, 160, 255)
+                border_col = (0, 245, 212)
             else:
-                top_col = banner_color
-                bot_col = banner_color
-            b_surf = render_pixel_text(banner_msg, scale=2, top_color=top_col, bottom_color=bot_col, shadow_offset=2)
-            self.screen.blit(b_surf, b_surf.get_rect(center=(win_w // 2, win_h - HUD_BOT_H // 2)))
-        else:
-            status = "PLAYER TRACKED" if pose.tracked else "SEARCHING FOR FEET..."
-            st_top = (80, 255, 160) if pose.tracked else (255, 224, 51)
-            st_bot = (0, 200, 100) if pose.tracked else (232, 56, 24)
-            status_txt = f"{status}  |  60 FPS  |  [F11] FULLSCREEN"
-            status_surf = render_pixel_text(status_txt, scale=2, top_color=st_top, bottom_color=st_bot, shadow_offset=2)
-            self.screen.blit(status_surf, status_surf.get_rect(center=(win_w // 2, win_h - HUD_BOT_H // 2)))
+                top_col = active_col
+                bot_col = active_col
+                border_col = (255, 190, 11)  # gold #ffbe0b
 
-        # Airborne Banner
-        if pose.airborne:
-            jump_badge = render_pixel_text("AIRBORNE! JUMP IMMUNITY!", scale=3, top_color=(100, 250, 255), bottom_color=(0, 160, 255), shadow_offset=3)
-            self.screen.blit(jump_badge, jump_badge.get_rect(center=(win_w // 2, HUD_TOP_H + 34)))
+            if is_airborne_toast:
+                alpha = 230
+                drift_y = 0
+            else:
+                t = self.toast_timer
+                drift_y = int((1.0 - (t / self.toast_max_duration)) * 12)
+                alpha = int(230 * min(1.0, t / 0.4)) if t < 0.4 else 230
+
+            t_surf = render_pixel_text(active_toast, scale=2, top_color=top_col, bottom_color=bot_col, shadow_offset=2)
+            tw, th = t_surf.get_size()
+            pw = tw + 36
+            ph = th + 14
+            pill_surf = pygame.Surface((pw, ph), pygame.SRCALPHA)
+            pill_surf.fill((22, 12, 46, alpha))
+            pygame.draw.rect(pill_surf, (*border_col, alpha), (0, 0, pw, ph), width=2, border_radius=ph // 2)
+
+            if alpha < 255:
+                txt_copy = t_surf.copy()
+                txt_copy.set_alpha(alpha)
+                pill_surf.blit(txt_copy, (18, 7))
+            else:
+                pill_surf.blit(t_surf, (18, 7))
+
+            toast_x = (win_w - pw) // 2
+            toast_y = HUD_TOP_H + 16 - drift_y
+            self.screen.blit(pill_surf, (toast_x, toast_y))
 
         # ======================================================================
         # 5. RESULT OVERLAY (PHASE.RESULT)
