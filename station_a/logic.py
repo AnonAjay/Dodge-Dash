@@ -26,7 +26,8 @@ GRID_SIZE = 10           # 10x10 subtiles
 DEFAULT_ARENA_M = 1.8    # 1.8m x 1.8m physical floor
 SUBTILE_M = DEFAULT_ARENA_M / GRID_SIZE  # 0.18 m (18 cm) per cell
 
-ROUND_DURATION_S = 30.0  # 30.0s active play per round
+ROUND_DURATION_S = 60.0  # 60.0s active play per round
+DEFAULT_ROUND_DURATION_S = 60.0  # Alias for backward-compatibility
 REST_DURATION_S = 7.5    # 7.5s resting interval between rounds
 TOTAL_ROUNDS = 3
 FEET_LOCK_REQUIRED_S = 0.5
@@ -258,6 +259,7 @@ class LavaEngine:
     def __init__(self, duration_s: float = ROUND_DURATION_S,
                  arena_w_m: float = DEFAULT_ARENA_M, arena_h_m: float = DEFAULT_ARENA_M):
         self.round_duration_s = duration_s
+        self.duration_s = duration_s  # Alias for backward-compatibility
         self.arena_w_m = arena_w_m
         self.arena_h_m = arena_h_m
         self.state = GameState(phase=Phase.PLAYING, time_left_s=duration_s, speed=1.0)

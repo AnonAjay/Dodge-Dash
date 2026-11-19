@@ -218,7 +218,7 @@ def test_resting_countdown_to_round_1_active():
 
     assert engine.tournament_phase == TournamentPhase.ROUND_ACTIVE
     assert engine.current_round == 1
-    assert 29.0 <= engine.round_timer <= 30.0
+    assert 59.0 <= engine.round_timer <= 60.0
 
 
 def test_round_1_rivers_only_and_5s_pacing():
@@ -322,6 +322,59 @@ def test_intermission_transitions_between_rounds():
     assert engine.tournament_phase == TournamentPhase.RESTING
     assert engine.rest_timer == 7.5
 
+
+
+def test_round_default_duration_and_stage_splits():
+    from shared.contracts import Phase
+
+    # 1. Default initialization
+    engine = LavaEngine()
+    assert engine.duration_s == 60.0
+    assert engine.round_duration_s == 60.0
+    assert engine.state.time_left_s == 60.0
+
+    # 2. Start / restart resets to 60.0s
+    engine.state.time_left_s = 15.0
+    engine.start_game("P001")
+    assert engine.state.time_left_s == 60.0
+    assert engine.current_round == 1
+    assert engine.round_multiplier == 1.0
+    assert engine.tournament_phase == TournamentPhase.WAITING_FOR_PLAYER
+
+    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9, airborne=False)
+
+    # 3. Round 1 Active countdown starts from 60.0s
+    engine.tournament_phase = TournamentPhase.ROUND_ACTIVE
+    engine.round_timer = 60.0
+    state, _ = engine.update(pose, dt=0.1)
+    assert 59.8 <= state.time_left_s <= 60.0
+    assert engine.current_round == 1
+    assert engine.round_multiplier == 1.0
+    assert state.phase == Phase.PLAYING
+
+    # 4. Round 1 expiration transitions to Round 2 Resting
+    engine.round_timer = 0.05
+    state, _ = engine.update(pose, dt=0.1)
+    assert engine.current_round == 2
+    assert engine.tournament_phase == TournamentPhase.RESTING
+    assert state.phase == Phase.PLAYING
+
+    # 5. Round 2 expiration transitions to Round 3 Resting
+    engine.tournament_phase = TournamentPhase.ROUND_ACTIVE
+    engine.round_timer = 0.05
+    state, _ = engine.update(pose, dt=0.1)
+    assert engine.current_round == 3
+    assert engine.tournament_phase == TournamentPhase.RESTING
+    assert state.phase == Phase.PLAYING
+
+    # 6. Final Round expiration transitions to TournamentPhase.COMPLETED and Phase.RESULT
+    engine.tournament_phase = TournamentPhase.ROUND_ACTIVE
+    engine.round_timer = 0.05
+    state, wave = engine.update(pose, dt=0.1)
+    assert engine.tournament_phase == TournamentPhase.COMPLETED
+    assert state.phase == Phase.RESULT
+    assert state.time_left_s == 0.0
+    assert wave is None
 
 
 
