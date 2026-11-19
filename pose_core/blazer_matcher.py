@@ -246,11 +246,21 @@ def evaluate_blazer_pose(
     else:
         match_pct = 0.0
 
-    # Pass condition: score >= pass_threshold_pct AND at most 1 red joint AND head aligned (if checked)
+    # Pass condition:
+    # 1. Overall weighted match percentage >= pass_threshold_pct
+    # 2. At most 1 red ("off") joint across evaluated joints
+    # 3. CRITICAL: ZERO red joints allowed on designated key_joints (the signature limbs)
+    # 4. Head aligned (if checked)
     num_reds = sum(1 for s in joint_status.values() if s == "off")
+    has_red_key = any(
+        joint_status.get(j) == "off"
+        for j in target.key_joints
+        if j in joint_status
+    )
     is_matched = (
         (match_pct >= pass_threshold_pct)
         and (num_reds <= 1)
+        and (not has_red_key)
         and (head_aligned if check_head else True)
     )
 

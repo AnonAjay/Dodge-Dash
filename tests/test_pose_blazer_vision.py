@@ -575,3 +575,63 @@ def test_blazer_2_stage_tournament_progression():
     assert engine.current_stage_name == "SPEED RUSH"
     assert engine.time_left_s == 30.0  # Stage 2 uses 30.0s global speedrun timer!
 
+
+def test_normal_standing_never_passes_and_red_key_fails():
+    """Verify that a player standing still cannot pass poses, and any red key joint rejects match."""
+    catalog = load_blazer_catalog("data/poses_index.json")
+
+    # Neutral standing postures
+    standing_angles = {
+        "left_shoulder": 20.0,
+        "right_shoulder": 20.0,
+        "left_elbow": 170.0,
+        "right_elbow": 170.0,
+        "left_knee": 178.0,
+        "right_knee": 178.0,
+    }
+
+    # Verify across all catalog poses: normal standing passes ZERO poses
+    for pose in catalog:
+        res = evaluate_blazer_pose(
+            player_landmarks=standing_angles,
+            target_pose=pose,
+            active_joints=LIMB_6_JOINTS,
+            check_head=False,
+        )
+        assert res.is_matched is False, f"Standing passed pose '{pose.id}' ({pose.name}) with score {res.match_pct}%"
+
+    # Specific unit test: 5 joints green (score > 80%), but the 1 signature key joint is RED
+    target = BlazerPoseTemplate(
+        id="peace_sign",
+        name="Peace Sign",
+        target_angles={
+            "left_shoulder": 49.0,
+            "right_shoulder": 20.0,
+            "left_elbow": 25.0,  # Key joint!
+            "right_elbow": 170.0,
+            "left_knee": 175.0,
+            "right_knee": 175.0,
+        },
+        key_joints=["left_elbow"],
+    )
+
+    player_lazy_arm = {
+        "left_shoulder": 49.0,   # perfect green
+        "right_shoulder": 20.0,  # perfect green
+        "left_elbow": 170.0,     # lazy straight arm (diff 145 deg -> RED!)
+        "right_elbow": 170.0,    # perfect green
+        "left_knee": 175.0,      # perfect green
+        "right_knee": 175.0,     # perfect green
+    }
+
+    res_lazy = evaluate_blazer_pose(
+        player_landmarks=player_lazy_arm,
+        target_pose=target,
+        active_joints=LIMB_6_JOINTS,
+        check_head=False,
+    )
+    # Even though 5 of 6 limbs are 100% green:
+    assert res_lazy.joint_status["left_elbow"] == "off"
+    assert res_lazy.is_matched is False
+
+
