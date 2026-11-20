@@ -100,6 +100,8 @@ def main() -> None:
                     engine.start_game(player_id=new_pid, player_name=new_name)
                     score_saved = False
                     result_timer_s = 0.0
+                    if new_name:
+                        renderer.sound_mgr.speak(f"Welcome {new_name}. Step onto the arena.")
 
             # Update live station heartbeat
             net_client.update_status(
@@ -123,6 +125,7 @@ def main() -> None:
                             print(f"[Station A] Starting game for {args.player} via keyboard trigger.")
                             engine.start_game(player_id=args.player, player_name="Player 1")
                             score_saved = False
+                            renderer.sound_mgr.speak("Get ready. Avoid the lava.")
                         elif engine.state.phase == Phase.RESULT:
                             print("[Station A] User skipped result screen back to Start Menu.")
                             engine.reset_to_idle()
