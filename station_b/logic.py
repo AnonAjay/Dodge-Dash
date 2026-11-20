@@ -64,16 +64,17 @@ class BlazerTournamentPhase(str, Enum):
     COMPLETED = "completed"
 
 
-def is_hand_on_head(
+def is_hand_on_nose(
     player_angles: dict[str, float | None] | None,
     player_landmarks_norm: Sequence[Sequence[float]] | None = None,
 ) -> bool:
-    """Detect skip gesture: Hand Raised High, Hand on Head/Crown/Ear, or Crossed Arms.
+    """Detect skip gesture: Hand/Finger to Nose or Crossed Arms.
     
     Vision conditions with MediaPipe 33 normalized landmarks:
-    - Hand Raised High: Either wrist clearly elevated above head/eyes
-    - Hand on Head: Either wrist within generous lateral range (28%) and near crown/temple
-    - Crossed Arms: Wrists crossed across torso
+    - Hand to Nose: Either hand (wrist, index finger, or pinky) within proximity (< 0.13)
+      of the nose with elbow flexed (< 140 deg). Completely avoids false-positive skips
+      during overhead / raised-hand poses (e.g. Superman, Disco, Cheer).
+    - Crossed Arms: Wrists crossed across torso at chest level with flexed elbows.
     """
     if not player_angles:
         return False
@@ -91,38 +92,49 @@ def is_hand_on_head(
         lsh = player_landmarks_norm[11]
         rsh = player_landmarks_norm[12]
 
-        # Check A: Hand Raised High (either wrist clearly above shoulders and head)
-        r_raised = (rw[1] < rsh[1] - 0.08) and (rw[1] < nose[1] - 0.02) and (abs(rw[0] - rsh[0]) < 0.35)
-        l_raised = (lw[1] < lsh[1] - 0.08) and (lw[1] < nose[1] - 0.02) and (abs(lw[0] - lsh[0]) < 0.35)
-        if r_raised or l_raised:
+        mid_sh_y = (lsh[1] + rsh[1]) / 2.0
+
+        # Candidate points for right hand (wrist, pinky, index within realistic arm reach)
+        r_hand_pts = [rw]
+        if len(player_landmarks_norm) >= 21:
+            for idx in (18, 20):
+                pt = player_landmarks_norm[idx]
+                if math.hypot(pt[0] - rw[0], pt[1] - rw[1]) < 0.25:
+                    r_hand_pts.append(pt)
+
+        # Candidate points for left hand (wrist, pinky, index within realistic arm reach)
+        l_hand_pts = [lw]
+        if len(player_landmarks_norm) >= 21:
+            for idx in (17, 19):
+                pt = player_landmarks_norm[idx]
+                if math.hypot(pt[0] - lw[0], pt[1] - lw[1]) < 0.25:
+                    l_hand_pts.append(pt)
+
+        # Check A: Right Hand to Nose (wrist near face level, elbow bent, close to nose)
+        r_elbow_bent = (r_el is not None and r_el < 140.0) or (r_sh is not None and r_sh > 25.0)
+        r_near_face = rw[1] < mid_sh_y + 0.15
+        min_r_dist = min(math.hypot(pt[0] - nose[0], pt[1] - nose[1]) for pt in r_hand_pts)
+        if min_r_dist < 0.13 and r_elbow_bent and r_near_face:
             return True
 
-        # Check B: Hand on Head / Temple / Ear (wrist above shoulder, close to head)
-        r_bent = (r_el is not None and r_el < 135.0) or (r_sh is not None and r_sh > 30.0)
-        r_on_head = (rw[1] < rsh[1]) and (rw[1] < nose[1] + 0.05) and (abs(rw[0] - nose[0]) < 0.25) and r_bent
-        if r_on_head:
-            return True
-
-        l_bent = (l_el is not None and l_el < 135.0) or (l_sh is not None and l_sh > 30.0)
-        l_on_head = (lw[1] < lsh[1]) and (lw[1] < nose[1] + 0.05) and (abs(lw[0] - nose[0]) < 0.25) and l_bent
-        if l_on_head:
+        # Check B: Left Hand to Nose (wrist near face level, elbow bent, close to nose)
+        l_elbow_bent = (l_el is not None and l_el < 140.0) or (l_sh is not None and l_sh > 25.0)
+        l_near_face = lw[1] < mid_sh_y + 0.15
+        min_l_dist = min(math.hypot(pt[0] - nose[0], pt[1] - nose[1]) for pt in l_hand_pts)
+        if min_l_dist < 0.13 and l_elbow_bent and l_near_face:
             return True
 
         # Check C: Crossed Arms with landmarks
         crossed = (lw[0] < rw[0]) if lsh[0] > rsh[0] else (rw[0] < lw[0])
-        mid_sh_y = (lsh[1] + rsh[1]) / 2.0
         chest_level = (lw[1] > mid_sh_y - 0.08) and (rw[1] > mid_sh_y - 0.08)
         elbows_bent = (l_el is not None and 40.0 <= l_el <= 120.0) and (r_el is not None and 40.0 <= r_el <= 120.0)
         if crossed and chest_level and elbows_bent:
             return True
 
-        # Landmarks present, neither hand raised, hand on head, nor crossed arms
+        # Landmarks present: neither hand on nose nor crossed arms
         return False
 
     # 2. Angle-only fallback (when landmarks are None / not provided)
-    if r_el is not None and r_sh is not None:
-        if r_el < 115.0 and r_sh > 50.0:
-            return True
     if l_el is not None and r_el is not None and l_sh is not None and r_sh is not None:
         if (40.0 <= l_el <= 120.0 and 40.0 <= r_el <= 120.0) and (l_sh < 55.0 and r_sh < 55.0):
             return True
@@ -130,8 +142,9 @@ def is_hand_on_head(
     return False
 
 
-# Backward-compatibility alias
-is_arms_crossed = is_hand_on_head
+# Backward-compatibility aliases
+is_hand_on_head = is_hand_on_nose
+is_arms_crossed = is_hand_on_nose
 
 
 def check_body_in_frame(

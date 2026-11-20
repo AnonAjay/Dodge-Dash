@@ -425,7 +425,7 @@ class BlazerArenaRenderer:
         # -------------------------------------------------------------
         deck_y = int(win_h * 0.70)
         # Left Chip: Pro-Tip
-        tip_surf = render_pixel_text("TIP: RAISE HAND HIGH TO SKIP POSE", scale=2, top_color=(0, 240, 255), bottom_color=(0, 160, 220), shadow_offset=1)
+        tip_surf = render_pixel_text("TIP: TOUCH NOSE (0.5s) TO SKIP POSE", scale=2, top_color=(0, 240, 255), bottom_color=(0, 160, 220), shadow_offset=1)
         tip_w, tip_h = tip_surf.get_width() + 24, tip_surf.get_height() + 14
         tip_x = (win_w // 2) - tip_w - 12 if last_player_score is not None else (win_w - tip_w) // 2
 

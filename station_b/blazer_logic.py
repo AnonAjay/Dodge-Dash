@@ -19,6 +19,7 @@ from station_b.logic import (
     BlazerTournamentPhase,
     check_body_in_frame,
     is_arms_crossed,
+    is_hand_on_nose,
 )
 
 __all__ = [
@@ -41,4 +42,5 @@ __all__ = [
     "BlazerTournamentPhase",
     "check_body_in_frame",
     "is_arms_crossed",
+    "is_hand_on_nose",
 ]

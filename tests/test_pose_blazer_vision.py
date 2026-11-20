@@ -482,6 +482,7 @@ def test_is_arms_crossed_detection():
     # 3. With landmark coordinates: Left wrist crossed past right wrist
     # Synthetic landmarks with 33 points
     lms = [[0.5, 0.5]] * 33
+    lms[0] = [0.50, 0.15]   # NOSE
     lms[11] = [0.65, 0.22]  # L_SHOULDER
     lms[12] = [0.35, 0.22]  # R_SHOULDER
     lms[15] = [0.45, 0.35]  # L_WRIST (crossed towards right side)
@@ -489,10 +490,39 @@ def test_is_arms_crossed_detection():
     assert is_arms_crossed(folded, lms) is True
 
     # Hands at hips (not crossed): lw.x > rw.x
-    lms_hips = list(lms)
+    lms_hips = [list(pt) for pt in lms]
     lms_hips[15] = [0.70, 0.50]  # uncrossed
     lms_hips[16] = [0.30, 0.50]
+    lms_hips[17] = [0.71, 0.52]
+    lms_hips[18] = [0.29, 0.52]
+    lms_hips[19] = [0.70, 0.52]
+    lms_hips[20] = [0.30, 0.52]
     assert is_arms_crossed(folded, lms_hips) is False
+
+    # 4. Hand to nose detection: Right index/wrist at nose (0.50, 0.20)
+    lms_nose = [[0.5, 0.5]] * 33
+    lms_nose[0] = [0.50, 0.20]   # NOSE
+    lms_nose[11] = [0.65, 0.25]  # L_SHOULDER
+    lms_nose[12] = [0.35, 0.25]  # R_SHOULDER
+    lms_nose[16] = [0.52, 0.21]  # R_WRIST touching nose (dist ~0.022 < 0.13)
+    lms_nose[20] = [0.51, 0.20]  # R_INDEX touching nose
+    bent_r_arm = {"right_elbow": 90.0, "right_shoulder": 45.0}
+    assert is_arms_crossed(bent_r_arm, lms_nose) is True
+
+    # 5. Overhead hands (Superman / Disco) should NOT trigger skip!
+    lms_overhead = [[0.5, 0.5]] * 33
+    lms_overhead[0] = [0.50, 0.25]   # NOSE
+    lms_overhead[11] = [0.65, 0.30]  # L_SHOULDER
+    lms_overhead[12] = [0.35, 0.30]  # R_SHOULDER
+    lms_overhead[15] = [0.65, 0.05]  # L_WRIST high in air (dist to nose ~0.25)
+    lms_overhead[16] = [0.35, 0.05]  # R_WRIST high in air (dist to nose ~0.25)
+    overhead_angles = {
+        "left_shoulder": 150.0,
+        "right_shoulder": 150.0,
+        "left_elbow": 170.0,
+        "right_elbow": 170.0,
+    }
+    assert is_arms_crossed(overhead_angles, lms_overhead) is False
 
 
 def test_blazer_skip_and_consecutive_elimination():
