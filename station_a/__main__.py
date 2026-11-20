@@ -65,9 +65,9 @@ def main() -> None:
             provider.start()
             args.keyboard = True
 
-    # 3. Initialize Game Engine & Renderer
+    # 3. Initialize Game Engine & Renderer (Boot into IDLE Start Menu)
     engine = LavaEngine(duration_s=args.duration, arena_w_m=arena_w, arena_h_m=arena_h)
-    engine.start_game(player_id=args.player)
+    engine.reset_to_idle()
 
     # 4. Background Network Dispatch Client
     net_client = StationNetworkClient(station="A", server_url=args.server)
@@ -79,8 +79,11 @@ def main() -> None:
     clock = pygame.time.Clock()
 
     score_saved = False
+    result_timer_s = 0.0
+    last_player_name = ""
+    last_player_score: int | None = None
 
-    print("[Station A] Game running at 60 FPS. Survive the lava!")
+    print("[Station A] Ready at 60 FPS. Sitting in Start Menu (Phase.IDLE).")
 
     try:
         running = True
@@ -92,10 +95,11 @@ def main() -> None:
                 dispatched = net_client.pop_next_player()
                 if dispatched:
                     new_pid = dispatched["player_id"]
-                    new_name = dispatched.get("name", "")
+                    new_name = dispatched.get("name", new_pid)
                     print(f"[Station A] Auto-dispatching next player from queue: {new_name} ({new_pid})")
-                    engine.start_game(player_id=new_pid)
+                    engine.start_game(player_id=new_pid, player_name=new_name)
                     score_saved = False
+                    result_timer_s = 0.0
 
             # Update live station heartbeat
             net_client.update_status(
@@ -114,10 +118,20 @@ def main() -> None:
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         running = False
+                    elif event.key in (pygame.K_SPACE, pygame.K_RETURN):
+                        if engine.state.phase == Phase.IDLE:
+                            print(f"[Station A] Starting game for {args.player} via keyboard trigger.")
+                            engine.start_game(player_id=args.player, player_name="Player 1")
+                            score_saved = False
+                        elif engine.state.phase == Phase.RESULT:
+                            print("[Station A] User skipped result screen back to Start Menu.")
+                            engine.reset_to_idle()
+                            score_saved = False
                     elif event.key == pygame.K_r:
                         # Reset / Restart round
-                        engine.start_game(player_id=args.player)
+                        engine.start_game(player_id=args.player, player_name="Player 1")
                         score_saved = False
+                        result_timer_s = 0.0
                     elif event.key in (pygame.K_F11, pygame.K_f):
                         renderer.toggle_fullscreen()
 
@@ -137,24 +151,35 @@ def main() -> None:
             # Tick game physics & continuous thermal simulation
             state, wave = engine.update(pose, dt)
 
-            # Record score when round finishes
-            if state.phase == Phase.RESULT and not score_saved:
-                total_actions = state.dodges + state.hits
-                accuracy = round(state.dodges / total_actions, 2) if total_actions > 0 else 0.0
-                event_id = f"A-{state.player_id}-{int(time.time())}"
-                score_event = ScoreEvent(
-                    event_id=event_id,
-                    player_id=state.player_id or "P001",
-                    station="A",
-                    game="dodge",
-                    score=state.score,
-                    accuracy=accuracy,
-                    best_streak=state.best_streak,
-                    duration_s=args.duration,
-                    finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                )
-                enqueue_score(score_event)
-                score_saved = True
+            # Record score when round finishes and handle 8s auto-return to IDLE
+            if state.phase == Phase.RESULT:
+                if not score_saved:
+                    total_actions = state.dodges + state.hits
+                    accuracy = round(state.dodges / total_actions, 2) if total_actions > 0 else 0.0
+                    event_id = f"A-{state.player_id}-{int(time.time())}"
+                    score_event = ScoreEvent(
+                        event_id=event_id,
+                        player_id=state.player_id or "P001",
+                        station="A",
+                        game="dodge",
+                        score=state.score,
+                        accuracy=accuracy,
+                        best_streak=state.best_streak,
+                        duration_s=args.duration,
+                        finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    )
+                    enqueue_score(score_event)
+                    score_saved = True
+                    result_timer_s = 8.0  # Display results for 8 seconds
+                    last_player_name = getattr(engine, "player_name", state.player_id or "Player 1")
+                    last_player_score = state.score
+                    print(f"[Station A] Tournament completed! Score: {state.score} pts. Holding 8s...")
+                else:
+                    result_timer_s -= dt
+                    if result_timer_s <= 0.0:
+                        print("[Station A] Result screen timeout elapsed. Returning to Start Menu (Phase.IDLE).")
+                        engine.reset_to_idle()
+                        score_saved = False
 
             # Render frame (AR Camera View with Depth Occlusion or Virtual Arena)
             renderer.draw(
@@ -173,6 +198,9 @@ def main() -> None:
                 round_multiplier=engine.round_multiplier,
                 is_resting=(engine.tournament_phase == TournamentPhase.RESTING),
                 fps=clock.get_fps(),
+                is_connected=bool(net_client.server_url),
+                last_player_name=last_player_name,
+                last_player_score=last_player_score,
             )
 
     finally:

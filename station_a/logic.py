@@ -283,8 +283,17 @@ class LavaEngine:
 
         # Multipliers
         self.round_multiplier: float = 1.0
+        self.player_name: str = ""
 
-    def start_game(self, player_id: str = "P001") -> None:
+    def reset_to_idle(self) -> None:
+        """Reset game engine to Phase.IDLE (Start Menu / Attract Mode)."""
+        self.state.phase = Phase.IDLE
+        self.wave = None
+        self.tournament_phase = TournamentPhase.WAITING_FOR_PLAYER
+        self.feet_lock_timer = 0.0
+
+    def start_game(self, player_id: str = "P001", player_name: str = "") -> None:
+        self.player_name = player_name or player_id
         self.state = GameState(
             phase=Phase.PLAYING,
             player_id=player_id,
@@ -305,7 +314,7 @@ class LavaEngine:
         self.round_multiplier = 1.0
 
         self.round_banner_title = "ROUND 1"
-        self.round_banner_subtitle = "STEP ONTO ARENA TO BEGIN"
+        self.round_banner_subtitle = f"READY {self.player_name.upper()}!"
         self.round_banner_color = (0, 255, 120)
         self.round_banner_timer = 2.0
         self.last_banner_msg = "SEARCHING FOR FEET... STEP ONTO ARENA"

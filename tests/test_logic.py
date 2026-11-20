@@ -377,5 +377,30 @@ def test_round_default_duration_and_stage_splits():
     assert wave is None
 
 
+def test_station_a_idle_and_reset_lifecycle():
+    from shared.contracts import Phase
+    engine = LavaEngine()
+    engine.reset_to_idle()
+    assert engine.state.phase == Phase.IDLE
+    assert engine.wave is None
+
+    # In IDLE, update() should not tick rounds or waves
+    pose = PoseFrame(tracked=True, floor_x_m=0.9, floor_y_m=0.9)
+    state, wave = engine.update(pose, dt=0.5)
+    assert state.phase == Phase.IDLE
+    assert wave is None
+
+    # Starting game sets PLAYING
+    engine.start_game(player_id="P999", player_name="Test Champion")
+    assert engine.state.phase == Phase.PLAYING
+    assert engine.player_name == "Test Champion"
+    assert engine.state.player_id == "P999"
+
+    # Resetting to idle restores IDLE
+    engine.reset_to_idle()
+    assert engine.state.phase == Phase.IDLE
+
+
+
 
 

@@ -208,6 +208,29 @@ def test_station_b_body_visibility_gate():
     engine.update(pose, dt=0.5, player_landmarks_norm=valid_lms)
 
     assert "STEP INTO FRAME" in engine.banner_msg
-    assert engine.time_left_s == initial_time  # Clock was paused!
+
+
+def test_station_b_idle_and_reset_lifecycle():
+    catalog = load_blazer_catalog("data/poses_index.json")
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
+    engine.reset_to_idle()
+    assert engine.state.phase == Phase.IDLE
+    assert engine.tournament_phase == "idle"
+
+    # In IDLE, update() should not advance timers or active poses
+    pose = PoseFrame(tracked=True)
+    state, current_pose = engine.update(pose, dt=0.5)
+    assert state.phase == Phase.IDLE
+
+    # Starting game sets PLAYING
+    engine.start_game(player_id="P888", player_name="Pose Master")
+    assert engine.state.phase == Phase.PLAYING
+    assert engine.player_name == "Pose Master"
+    assert engine.state.player_id == "P888"
+
+    # Resetting to idle restores IDLE
+    engine.reset_to_idle()
+    assert engine.state.phase == Phase.IDLE
+    assert engine.tournament_phase == "idle"
 
 

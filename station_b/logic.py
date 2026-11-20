@@ -253,8 +253,19 @@ class BlazerGameEngine:
             return self.current_round_idx + 1
         return self.r2_cleared + 1
 
-    def start_game(self, player_id: str = "P001", rng: random.Random | None = None) -> None:
+    def reset_to_idle(self) -> None:
+        """Reset tournament engine to Phase.IDLE (Start Menu / Attract Mode)."""
+        self.state = GameState(phase=Phase.IDLE)
+        self.tournament_phase = "idle"
+        self.is_pose_locked = False
+        self.hold_timer_s = 0.0
+        self.skip_hold_s = 0.0
+        self.banner_msg = "PRESS SPACE OR STEP IN TO START"
+        self.banner_color = (0, 220, 255)
+
+    def start_game(self, player_id: str = "P001", player_name: str = "", rng: random.Random | None = None) -> None:
         """Initialize a new tournament run with randomized poses."""
+        self.player_name = player_name or player_id
         rand = rng or random.Random()
         # Sample 10 poses for Round 1
         self.round_1_poses = sample_game_poses(self.full_catalog, n=ROUND_1_POSES_COUNT, rng=rand)

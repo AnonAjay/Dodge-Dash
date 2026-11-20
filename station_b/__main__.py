@@ -88,15 +88,16 @@ def main() -> None:
 
     # 3. Audio & Announcer System
     sounds = BlazerSoundManager(enable_voice=not args.no_voice)
-    sounds.play_game_start()
-    sounds.play_stage_start(1)
 
     clock = pygame.time.Clock()
     score_saved = False
+    result_timer_s = 0.0
+    last_player_name = ""
+    last_player_score: int | None = None
 
-    print(f"[Station B] Launching POSE BLAZER TOURNAMENT ({args.rounds} Rounds)...")
+    print(f"[Station B] Initializing POSE BLAZER TOURNAMENT ({args.rounds} Rounds)...")
     engine = BlazerGameEngine(total_rounds=args.rounds, tournament_mode=True)
-    engine.start_game(player_id=args.player)
+    engine.reset_to_idle()
     renderer = BlazerArenaRenderer(fullscreen=args.fullscreen)
 
     # 4. Background Network Dispatch Client
@@ -117,16 +118,17 @@ def main() -> None:
         while running:
             dt = clock.tick(60) / 1000.0
 
-            # Auto-dispatch next player from Laptop 3 queue if waiting or tournament ended
+            # Auto-dispatch next player from Laptop 3 queue if idle, waiting, or tournament ended
             curr_tp_str = str(getattr(engine, "tournament_phase", ""))
-            if curr_tp_str in ("waiting", "completed") or score_saved:
+            if engine.state.phase in (Phase.IDLE, Phase.RESULT) or curr_tp_str in ("waiting", "completed") or score_saved:
                 dispatched = net_client.pop_next_player()
                 if dispatched:
                     new_pid = dispatched["player_id"]
-                    new_name = dispatched.get("name", "")
+                    new_name = dispatched.get("name", new_pid)
                     print(f"[Station B] Auto-dispatching next player from queue: {new_name} ({new_pid})")
-                    engine.start_game(player_id=new_pid)
+                    engine.start_game(player_id=new_pid, player_name=new_name)
                     score_saved = False
+                    result_timer_s = 0.0
                     prev_locked = False
                     prev_skips = 0
                     prev_stage = 1
@@ -138,7 +140,7 @@ def main() -> None:
 
             # Update live station heartbeat
             net_client.update_status(
-                status=curr_tp_str,
+                status=engine.state.phase.value if engine.state.phase == Phase.IDLE else curr_tp_str,
                 player_id=engine.state.player_id,
                 score=engine.state.score,
             )
@@ -149,9 +151,26 @@ def main() -> None:
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         running = False
+                    elif event.key in (pygame.K_SPACE, pygame.K_RETURN):
+                        if engine.state.phase == Phase.IDLE:
+                            print(f"[Station B] Starting tournament for {args.player} via keyboard trigger.")
+                            engine.start_game(player_id=args.player, player_name="Player 1")
+                            score_saved = False
+                            prev_locked = False
+                            prev_skips = 0
+                            prev_stage = 1
+                            last_tick_sec = -1
+                            sounds.play_game_start()
+                            sounds.play_stage_start(1)
+                            sounds.say("Get ready. Match the poses.")
+                        elif engine.state.phase == Phase.RESULT:
+                            print("[Station B] Skipping results screen back to Start Menu.")
+                            engine.reset_to_idle()
+                            score_saved = False
                     elif event.key == pygame.K_r:
-                        engine.start_game(player_id=args.player)
+                        engine.start_game(player_id=args.player, player_name="Player 1")
                         score_saved = False
+                        result_timer_s = 0.0
                         prev_locked = False
                         prev_skips = 0
                         prev_stage = 1
@@ -244,26 +263,36 @@ def main() -> None:
 
             prev_phase = curr_tp
 
-            # Save score when tournament ends
-            if state.phase == Phase.RESULT and not score_saved:
-                total_att = state.dodges + state.hits
-                acc = round(state.dodges / max(1, total_att), 2)
-                event_id = f"B-BLAZER-{state.player_id}-{int(time.time())}"
-                score_event = ScoreEvent(
-                    event_id=event_id,
-                    player_id=state.player_id or "P001",
-                    station="B",
-                    game="blazer",
-                    score=state.score,
-                    accuracy=acc,
-                    best_streak=state.streak,
-                    duration_s=engine.round_duration_s * engine.total_rounds,
-                    finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                )
-                enqueue_score(score_event)
-                score_saved = True
-                sounds.play_game_over()
-                print(f"[Station B] Tournament score saved to outbox: {state.score} pts")
+            # Save score when tournament ends and handle 8s auto-return to IDLE
+            if state.phase == Phase.RESULT:
+                if not score_saved:
+                    total_att = state.dodges + state.hits
+                    acc = round(state.dodges / max(1, total_att), 2)
+                    event_id = f"B-BLAZER-{state.player_id}-{int(time.time())}"
+                    score_event = ScoreEvent(
+                        event_id=event_id,
+                        player_id=state.player_id or "P001",
+                        station="B",
+                        game="blazer",
+                        score=state.score,
+                        accuracy=acc,
+                        best_streak=state.streak,
+                        duration_s=engine.round_duration_s * engine.total_rounds,
+                        finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    )
+                    enqueue_score(score_event)
+                    score_saved = True
+                    sounds.play_game_over()
+                    result_timer_s = 8.0  # Hold for 8 seconds
+                    last_player_name = getattr(engine, "player_name", state.player_id or "Player 1")
+                    last_player_score = state.score
+                    print(f"[Station B] Tournament score saved to outbox: {state.score} pts. Holding 8s...")
+                else:
+                    result_timer_s -= dt
+                    if result_timer_s <= 0.0:
+                        print("[Station B] Result screen timeout elapsed. Returning to Start Menu (Phase.IDLE).")
+                        engine.reset_to_idle()
+                        score_saved = False
 
             # Render Split HD UI
             renderer.draw(
@@ -275,6 +304,9 @@ def main() -> None:
                 player_angles=player_angles,
                 fps=clock.get_fps(),
                 dt=dt,
+                is_connected=bool(net_client.server_url),
+                last_player_name=last_player_name,
+                last_player_score=last_player_score,
             )
 
     finally:
