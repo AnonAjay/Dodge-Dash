@@ -179,7 +179,11 @@ class PoseStudioApp:
         self.banner_color = C_AMBER_YELLOW
         self.banner_timer = 3.0
 
-    def capture_live(self, live_angles: dict[str, float | None]) -> None:
+    def capture_live(
+        self,
+        live_angles: dict[str, float | None],
+        live_landmarks_norm: list[list[float]] | None = None,
+    ) -> None:
         """Capture live webcam angles directly into current pose target."""
         valid_captured = {k: round(v, 1) for k, v in live_angles.items() if v is not None and k in JOINT_NAMES}
         if not valid_captured:
@@ -190,6 +194,8 @@ class PoseStudioApp:
 
         for k, v in valid_captured.items():
             self.current_pose.target_angles[k] = v
+        if live_landmarks_norm:
+            self.current_pose.landmarks_norm = copy.deepcopy(live_landmarks_norm)
 
         self.dirty = True
         self.banner_msg = f"CAPTURED! Updated {len(valid_captured)} angles from live camera pose."
@@ -211,15 +217,24 @@ class PoseStudioApp:
             tracked = False
 
             if self.cam_source:
-                pose, raw_frame, _ = self.cam_source.snapshot()
+                pose, raw_frame, debug_info = self.cam_source.snapshot()
                 tracked = pose.tracked
                 if raw_frame is not None:
                     cam_frame = raw_frame
-                if pose.landmarks_3d:
-                    player_landmarks_norm = pose.landmarks_3d
-                    player_angles = extract_pose_angles(pose.landmarks_3d, mirrored=True, planar_2d=True)
-                    if len(pose.landmarks_3d) > 0:
-                        player_head = (pose.landmarks_3d[0][0], pose.landmarks_3d[0][1])
+                if debug_info and "landmarks_px" in debug_info and len(debug_info["landmarks_px"]) > 0:
+                    lms_px = debug_info["landmarks_px"]
+                    player_angles = extract_pose_angles(lms_px, mirrored=True)
+                    if cam_frame is not None:
+                        ch, cw = cam_frame.shape[:2]
+                        player_landmarks_norm = [
+                            [float(lm[0]) / cw, float(lm[1]) / ch, float(lm[2]) if len(lm) > 2 else 1.0]
+                            for lm in lms_px
+                        ]
+                        lm0 = lms_px[0]
+                        hx, hy = float(lm0[0]), float(lm0[1])
+                        hvis = float(lm0[2]) if len(lm0) > 2 else 1.0
+                        if hvis > 0.35:
+                            player_head = (hx / cw, hy / ch)
 
             # Keyboard & Event Handling
             for event in pygame.event.get():
@@ -283,7 +298,7 @@ class PoseStudioApp:
 
                     # Capture Live Webcam Angles
                     elif event.key == pygame.K_c:
-                        self.capture_live(player_angles)
+                        self.capture_live(player_angles, player_landmarks_norm)
 
             # Evaluate real-time match against current pose
             match_res: BlazerMatchResult | None = None
