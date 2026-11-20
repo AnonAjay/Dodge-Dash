@@ -867,6 +867,109 @@ class LavaArenaRenderer:
 
         return out_frame
 
+    def _render_attract_screen(
+        self,
+        win_w: int,
+        win_h: int,
+        cam_frame: np.ndarray | None,
+        debug: dict | None,
+        pose: PoseFrame,
+        now: float,
+        is_connected: bool,
+        last_player_name: str,
+        last_player_score: int | None,
+    ) -> None:
+        """Render a clean, dedicated Attract / Start Screen without in-game HUD bleed."""
+        self.screen.fill((16, 18, 22))
+
+        # 1. Background (AR camera view or arena mat)
+        if cam_frame is not None:
+            ar_bg = self._render_ar_frame(cam_frame, None, pose, now, 0.016, debug=debug)
+            rgb = cv2.cvtColor(ar_bg, cv2.COLOR_BGR2RGB)
+            cam_surf = pygame.image.frombuffer(rgb.tobytes(), (win_w, win_h), "RGB")
+            self.screen.blit(cam_surf, (0, 0))
+
+        # 2. Cyber Tint Veil (55% dark) so text has crisp arcade contrast
+        tint = pygame.Surface((win_w, win_h), pygame.SRCALPHA)
+        tint.fill((8, 12, 20, 160))
+        self.screen.blit(tint, (0, 0))
+
+        # 3. Header (ASCII characters only - NO '?')
+        arcade_tag = render_pixel_text("TITANS' ARCADE : STATION A", scale=2, top_color=(0, 240, 255), bottom_color=(0, 140, 255), shadow_offset=2)
+        self.screen.blit(arcade_tag, arcade_tag.get_rect(center=(win_w // 2, int(win_h * 0.12))))
+
+        title_surf = render_pixel_text(
+            "FLOOR IS LAVA",
+            scale=5 if win_w > 900 else 4,
+            top_color=(255, 224, 51),
+            bottom_color=(232, 56, 24),
+            shadow_offset=4,
+        )
+        self.screen.blit(title_surf, title_surf.get_rect(center=(win_w // 2, int(win_h * 0.22))))
+
+        sub_title = render_pixel_text("3-ROUND ARENA SURVIVAL TOURNAMENT", scale=2, top_color=(200, 210, 230), bottom_color=(120, 140, 160), shadow_offset=2)
+        self.screen.blit(sub_title, sub_title.get_rect(center=(win_w // 2, int(win_h * 0.30))))
+
+        # 4. Network / Standalone Status Panel
+        panel_w, panel_h = min(680, win_w - 60), 160
+        p_x = (win_w - panel_w) // 2
+        p_y = int(win_h * 0.36)
+
+        p_surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        p_surf.fill((16, 22, 34, 235))
+        self.screen.blit(p_surf, (p_x, p_y))
+        border_color = (0, 255, 180) if is_connected else (255, 190, 0)
+        pygame.draw.rect(self.screen, border_color, (p_x, p_y, panel_w, panel_h), 2, border_radius=8)
+
+        if is_connected:
+            badge = render_pixel_text("[ ONLINE : REGISTRATION DESK CONNECTED ]", scale=2, top_color=(0, 255, 180), bottom_color=(0, 180, 100), shadow_offset=2)
+            self.screen.blit(badge, badge.get_rect(center=(win_w // 2, p_y + 35)))
+
+            pulse_alpha = int(180 + 75 * math.sin(now * 5.0))
+            main_prompt = render_pixel_text("WAITING FOR PLAYER DISPATCH...", scale=3, top_color=(255, 220, 50), bottom_color=(255, 140, 0), shadow_offset=3)
+            main_prompt.set_alpha(pulse_alpha)
+            self.screen.blit(main_prompt, main_prompt.get_rect(center=(win_w // 2, p_y + 80)))
+
+            sub_prompt = render_pixel_text("Register player at Laptop 3 to launch station!", scale=2, top_color=(180, 200, 220), bottom_color=(100, 120, 140), shadow_offset=1)
+            self.screen.blit(sub_prompt, sub_prompt.get_rect(center=(win_w // 2, p_y + 125)))
+        else:
+            badge = render_pixel_text("[ STANDALONE ARCADE MODE ]", scale=2, top_color=(255, 200, 0), bottom_color=(200, 120, 0), shadow_offset=2)
+            self.screen.blit(badge, badge.get_rect(center=(win_w // 2, p_y + 35)))
+
+            pulse_alpha = int(180 + 75 * math.sin(now * 5.0))
+            main_prompt = render_pixel_text("PRESS [SPACE] TO START", scale=3, top_color=(0, 255, 180), bottom_color=(0, 180, 100), shadow_offset=3)
+            main_prompt.set_alpha(pulse_alpha)
+            self.screen.blit(main_prompt, main_prompt.get_rect(center=(win_w // 2, p_y + 80)))
+
+            sub_prompt = render_pixel_text("Step into the arena or press SPACE to begin", scale=2, top_color=(180, 200, 220), bottom_color=(100, 120, 140), shadow_offset=1)
+            self.screen.blit(sub_prompt, sub_prompt.get_rect(center=(win_w // 2, p_y + 125)))
+
+        # 5. Recent Run Banner (ASCII colon - NO '?')
+        if last_player_score is not None:
+            rec_w, rec_h = min(560, win_w - 80), 45
+            rx = (win_w - rec_w) // 2
+            ry = int(win_h * 0.60)
+            rec_bg = pygame.Surface((rec_w, rec_h), pygame.SRCALPHA)
+            rec_bg.fill((24, 28, 40, 210))
+            self.screen.blit(rec_bg, (rx, ry))
+            pygame.draw.rect(self.screen, (0, 200, 255), (rx, ry, rec_w, rec_h), 1, border_radius=4)
+            name_disp = last_player_name or "PLAYER"
+            rec_txt = render_pixel_text(f"RECENT RUN: {name_disp.upper()} : {last_player_score:04d} PTS", scale=2, top_color=(0, 240, 255), bottom_color=(0, 160, 240), shadow_offset=2)
+            self.screen.blit(rec_txt, rec_txt.get_rect(center=(win_w // 2, ry + rec_h // 2)))
+
+        # 6. Tracking Indicator
+        tr_y = int(win_h * 0.72)
+        if pose.tracked:
+            trk_surf = render_pixel_text("FEET DETECTED IN ARENA [READY]", scale=2, top_color=(0, 255, 128), bottom_color=(0, 160, 70), shadow_offset=2)
+        else:
+            trk_surf = render_pixel_text("STEP ONTO THE ARENA MAT TO POSITION FEET", scale=2, top_color=(255, 170, 0), bottom_color=(190, 110, 0), shadow_offset=2)
+        self.screen.blit(trk_surf, trk_surf.get_rect(center=(win_w // 2, tr_y)))
+
+        # 7. Controls footer
+        foot_str = "[SPACE] START   |   [R] RESET   |   [F11] FULLSCREEN   |   [ESC] EXIT"
+        foot_surf = render_pixel_text(foot_str, scale=2, top_color=(150, 165, 185), bottom_color=(90, 105, 125), shadow_offset=1)
+        self.screen.blit(foot_surf, foot_surf.get_rect(center=(win_w // 2, win_h - 35)))
+
     def draw(self, state: GameState, wave: LavaWave | None, pose: PoseFrame,
              cam_frame: np.ndarray | None = None,
              debug: dict | None = None,
@@ -889,6 +992,23 @@ class LavaArenaRenderer:
 
         win_w, win_h = self.screen.get_size()
         self.screen.fill((16, 18, 22))
+
+        # In Phase.IDLE (Start Menu / Attract), render dedicated clean screen with NO in-game HUD bleed!
+        if state.phase == Phase.IDLE:
+            self._prev_phase = state.phase
+            self._render_attract_screen(
+                win_w=win_w,
+                win_h=win_h,
+                cam_frame=cam_frame,
+                debug=debug,
+                pose=pose,
+                now=now,
+                is_connected=is_connected,
+                last_player_name=last_player_name,
+                last_player_score=last_player_score,
+            )
+            pygame.display.flip()
+            return
 
         # ======================================================================
         # 0. RETRO 8-BIT ARCADE SOUND STATE TRANSITIONS
@@ -1230,90 +1350,6 @@ class LavaArenaRenderer:
             pygame.draw.rect(self.screen, (255, 60, 60), (br_x, br_y, btn_w, btn_h), 2, border_radius=4)
             esc_prompt = render_pixel_text("[ESC] EXIT", scale=2, top_color=(255, 70, 70), bottom_color=(190, 20, 20), shadow_offset=2)
             self.screen.blit(esc_prompt, esc_prompt.get_rect(center=(br_x + btn_w // 2, br_y + btn_h // 2)))
-
-        # ======================================================================
-        # 6. ATTRACT / START MENU OVERLAY (PHASE.IDLE)
-        # ======================================================================
-        if state.phase == Phase.IDLE:
-            overlay = pygame.Surface((win_w, win_h), pygame.SRCALPHA)
-            overlay.fill((8, 10, 16, 215))
-            self.screen.blit(overlay, (0, 0))
-
-            # Header
-            arcade_tag = render_pixel_text("TITANS' ARCADE — STATION A", scale=2, top_color=(0, 240, 255), bottom_color=(0, 140, 255), shadow_offset=2)
-            self.screen.blit(arcade_tag, arcade_tag.get_rect(center=(win_w // 2, int(win_h * 0.12))))
-
-            title_surf = render_pixel_text(
-                "FLOOR IS LAVA",
-                scale=5 if win_w > 900 else 4,
-                top_color=(255, 224, 51),
-                bottom_color=(232, 56, 24),
-                shadow_offset=4,
-            )
-            self.screen.blit(title_surf, title_surf.get_rect(center=(win_w // 2, int(win_h * 0.22))))
-
-            sub_title = render_pixel_text("3-ROUND ARENA SURVIVAL TOURNAMENT", scale=2, top_color=(200, 210, 230), bottom_color=(120, 140, 160), shadow_offset=2)
-            self.screen.blit(sub_title, sub_title.get_rect(center=(win_w // 2, int(win_h * 0.30))))
-
-            # Network / Standalone Status Panel
-            panel_w, panel_h = min(680, win_w - 60), 160
-            p_x = (win_w - panel_w) // 2
-            p_y = int(win_h * 0.36)
-
-            p_surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
-            p_surf.fill((16, 22, 34, 235))
-            self.screen.blit(p_surf, (p_x, p_y))
-            border_color = (0, 255, 180) if is_connected else (255, 190, 0)
-            pygame.draw.rect(self.screen, border_color, (p_x, p_y, panel_w, panel_h), 2, border_radius=8)
-
-            if is_connected:
-                badge = render_pixel_text("[ ONLINE — REGISTRATION DESK CONNECTED ]", scale=2, top_color=(0, 255, 180), bottom_color=(0, 180, 100), shadow_offset=2)
-                self.screen.blit(badge, badge.get_rect(center=(win_w // 2, p_y + 35)))
-
-                pulse_alpha = int(180 + 75 * math.sin(now * 5.0))
-                main_prompt = render_pixel_text("WAITING FOR PLAYER DISPATCH...", scale=3, top_color=(255, 220, 50), bottom_color=(255, 140, 0), shadow_offset=3)
-                main_prompt.set_alpha(pulse_alpha)
-                self.screen.blit(main_prompt, main_prompt.get_rect(center=(win_w // 2, p_y + 80)))
-
-                sub_prompt = render_pixel_text("Register player at Laptop 3 to launch station!", scale=2, top_color=(180, 200, 220), bottom_color=(100, 120, 140), shadow_offset=1)
-                self.screen.blit(sub_prompt, sub_prompt.get_rect(center=(win_w // 2, p_y + 125)))
-            else:
-                badge = render_pixel_text("[ STANDALONE ARCADE MODE ]", scale=2, top_color=(255, 200, 0), bottom_color=(200, 120, 0), shadow_offset=2)
-                self.screen.blit(badge, badge.get_rect(center=(win_w // 2, p_y + 35)))
-
-                pulse_alpha = int(180 + 75 * math.sin(now * 5.0))
-                main_prompt = render_pixel_text("PRESS [SPACE] TO START", scale=3, top_color=(0, 255, 180), bottom_color=(0, 180, 100), shadow_offset=3)
-                main_prompt.set_alpha(pulse_alpha)
-                self.screen.blit(main_prompt, main_prompt.get_rect(center=(win_w // 2, p_y + 80)))
-
-                sub_prompt = render_pixel_text("Step into the arena or press SPACE to begin", scale=2, top_color=(180, 200, 220), bottom_color=(100, 120, 140), shadow_offset=1)
-                self.screen.blit(sub_prompt, sub_prompt.get_rect(center=(win_w // 2, p_y + 125)))
-
-            # Recent Run Banner
-            if last_player_score is not None:
-                rec_w, rec_h = min(560, win_w - 80), 45
-                rx = (win_w - rec_w) // 2
-                ry = int(win_h * 0.60)
-                rec_bg = pygame.Surface((rec_w, rec_h), pygame.SRCALPHA)
-                rec_bg.fill((24, 28, 40, 210))
-                self.screen.blit(rec_bg, (rx, ry))
-                pygame.draw.rect(self.screen, (0, 200, 255), (rx, ry, rec_w, rec_h), 1, border_radius=4)
-                name_disp = last_player_name or "PLAYER"
-                rec_txt = render_pixel_text(f"RECENT RUN: {name_disp.upper()} — {last_player_score:04d} PTS", scale=2, top_color=(0, 240, 255), bottom_color=(0, 160, 240), shadow_offset=2)
-                self.screen.blit(rec_txt, rec_txt.get_rect(center=(win_w // 2, ry + rec_h // 2)))
-
-            # Tracking Indicator
-            tr_y = int(win_h * 0.72)
-            if pose.tracked:
-                trk_surf = render_pixel_text("FEET DETECTED IN ARENA [READY]", scale=2, top_color=(0, 255, 128), bottom_color=(0, 160, 70), shadow_offset=2)
-            else:
-                trk_surf = render_pixel_text("STEP ONTO THE ARENA MAT TO POSITION FEET", scale=2, top_color=(255, 170, 0), bottom_color=(190, 110, 0), shadow_offset=2)
-            self.screen.blit(trk_surf, trk_surf.get_rect(center=(win_w // 2, tr_y)))
-
-            # Controls footer
-            foot_str = "[SPACE] START   |   [R] RESET   |   [F11] FULLSCREEN   |   [ESC] EXIT"
-            foot_surf = render_pixel_text(foot_str, scale=2, top_color=(150, 165, 185), bottom_color=(90, 105, 125), shadow_offset=1)
-            self.screen.blit(foot_surf, foot_surf.get_rect(center=(win_w // 2, win_h - 35)))
 
         pygame.display.flip()
 

@@ -478,11 +478,10 @@ class LavaEngine:
                     is_on_lava = any(wave.target_mask[c][r] for (c, r) in touched)
 
                     if is_on_lava and not pose.airborne:
-                        # HIT: -2 penalty, score cannot go below 0, streak reset
+                        # HIT: streak reset, hit counter incremented, NO score penalty (score >= 0)
                         self.state.hits += 1
                         self.state.streak = 0
-                        self.state.score = max(0, self.state.score - 2)
-                        self.last_banner_msg = "BURNT! -2 PTS"
+                        self.last_banner_msg = "BURNT! STREAK RESET"
                         self.last_banner_color = (255, 40, 40)
                         self.banner_timer = 1.2
                     else:

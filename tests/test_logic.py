@@ -280,7 +280,7 @@ def test_streak_multipliers_and_hit_penalties():
     engine.state.score = 20
     engine.state.streak = 5
 
-    # Simulate Hit (Burnt): -2 penalty, score cannot go below 0, streak reset
+    # Simulate Hit (Burnt): streak reset, hits incremented, NO score penalty
     mask = [[True] * GRID_SIZE for _ in range(GRID_SIZE)]
     wave = LavaWave(
         pattern=WavePattern.RIVER,
@@ -295,16 +295,9 @@ def test_streak_multipliers_and_hit_penalties():
     engine.update(pose, dt=0.1)
 
     assert engine.state.hits == 1
-    assert engine.state.score == 18  # 20 - 2 = 18
+    assert engine.state.score == 20  # No negative deduction on hit
     assert engine.state.streak == 0
     assert "BURNT" in engine.last_banner_msg
-
-    # Test score floor at 0
-    engine.state.score = 1
-    wave.judged = False
-    wave.timer = 0.05
-    engine.update(pose, dt=0.1)
-    assert engine.state.score == 0  # clamped at 0
 
 
 def test_intermission_transitions_between_rounds():
