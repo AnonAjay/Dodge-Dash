@@ -139,6 +139,9 @@ class ArcadeSoundManager:
         except Exception:
             pass
 
+    # Convenient alias
+    say = speak
+
     def _load_or_synthesize_all(self) -> None:
         """Load from assets/sounds/ if present, or synthesize in-memory 8-bit waveforms."""
         if not self.enabled:

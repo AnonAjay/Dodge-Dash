@@ -136,7 +136,7 @@ def main() -> None:
                     sounds.play_game_start()
                     sounds.play_stage_start(1)
                     if new_name:
-                        sounds.say(f"Welcome {new_name}. Step into frame.")
+                        sounds.speak(f"Welcome {new_name}. Step into frame.")
 
             # Update live station heartbeat
             net_client.update_status(
@@ -162,7 +162,7 @@ def main() -> None:
                             last_tick_sec = -1
                             sounds.play_game_start()
                             sounds.play_stage_start(1)
-                            sounds.say("Get ready. Match the poses.")
+                            sounds.speak("Get ready. Match the poses.")
                         elif engine.state.phase == Phase.RESULT:
                             print("[Station B] Skipping results screen back to Start Menu.")
                             engine.reset_to_idle()
