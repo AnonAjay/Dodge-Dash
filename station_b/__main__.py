@@ -103,6 +103,7 @@ def main() -> None:
     # 4. Background Network Dispatch Client
     net_client = StationNetworkClient(station="B", server_url=args.server)
     net_client.start()
+    renderer.server_url = net_client.server_url
     if net_client.server_url:
         print(f"[Station B] Connected to Laptop 3 Server: {net_client.server_url}")
 
@@ -283,10 +284,10 @@ def main() -> None:
                     enqueue_score(score_event)
                     score_saved = True
                     sounds.play_game_over()
-                    result_timer_s = 8.0  # Hold for 8 seconds
+                    result_timer_s = 15.0  # Hold for 15 seconds to display Souvenir QR
                     last_player_name = getattr(engine, "player_name", state.player_id or "Player 1")
                     last_player_score = state.score
-                    print(f"[Station B] Tournament score saved to outbox: {state.score} pts. Holding 8s...")
+                    print(f"[Station B] Tournament score saved to outbox: {state.score} pts. Displaying Souvenir QR (15s hold)...")
                 else:
                     result_timer_s -= dt
                     if result_timer_s <= 0.0:

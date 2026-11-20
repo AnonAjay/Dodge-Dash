@@ -255,7 +255,7 @@ def register_player(player_in: PlayerCreate, request: Request) -> Any:
         }
         players.append(profile)
         _write_players_locked(players)
-    _trigger_bg_upload(player_id)
+    # Souvenir card is generated only after match completion in post_score()
     return profile
 
 
@@ -573,17 +573,62 @@ def souvenir_card_page(player_id: str) -> HTMLResponse:
     with _lock:
         players = _read_players_locked()
         player = next((p for p in players if p.get("player_id") == player_id), None)
+        scores = _read_scores_locked()
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
 
+    has_played = any(s.get("player_id") == player_id for s in scores)
     name = player.get("name", "Challenger")
     roll_no = player.get("roll_no")
     roll_display = f" | URN: {roll_no}" if roll_no else ""
+    refresh_meta = '<meta http-equiv="refresh" content="4">' if not has_played else ''
+
+    if has_played:
+        main_content = f"""
+  <div class="player-tag">★ SOUVENIR CARD: {name} ({player_id}){roll_display} ★</div>
+  <div class="card-preview">
+    <img src="/api/cards/{player_id}" alt="Titans' Arcade Souvenir Card - {player_id}" />
+  </div>
+  <div class="action-box">
+    <a href="/api/cards/{player_id}" download="TitansArcade_{player_id}.png" class="btn-download">
+      ⬇ DOWNLOAD SOUVENIR CARD
+    </a>
+    <div class="card-footer-info">
+      Full 1080×1350 High Resolution PNG • 100% Offline Local Network<br>
+      Saved directly to your device • Share with friends!
+    </div>
+  </div>"""
+    else:
+        main_content = f"""
+  <div class="player-tag">★ MATCH IN PROGRESS: {name} ({player_id}){roll_display} ★</div>
+  <div class="card-preview" style="padding: 44px 24px; text-align: center; background: #1c0e30; border: 2px dashed var(--sunset-gold);">
+    <div style="font-size: 52px; margin-bottom: 14px;">🎮</div>
+    <div style="font-family: var(--font-pixel); font-size: 18px; color: var(--sunset-gold); font-weight: 800; margin-bottom: 10px; letter-spacing: 1px;">
+      SOUVENIR CARD LOCKED
+    </div>
+    <div style="font-size: 14px; color: #fbcfe8; line-height: 1.6; max-width: 440px; margin: 0 auto;">
+      Welcome, <strong>{name}</strong>! Your official tournament souvenir photo card will be stamped with your final scores, rank, and accuracy immediately after completing your match at <strong>Station A</strong> or <strong>Station B</strong>.
+    </div>
+    <div style="margin-top: 26px; padding: 10px 16px; background: rgba(53, 35, 93, 0.7); border-radius: 6px; display: inline-block; font-family: var(--font-pixel); font-size: 11px; color: var(--neon-cyan);">
+      ⏳ WAITING FOR GAMEPLAY COMPLETION... (AUTO-REFRESHING)
+    </div>
+  </div>
+  <div class="action-box">
+    <div class="card-footer-info" style="font-size: 13px; color: #ffd152;">
+      Proceed to your assigned game station to start your match!
+    </div>
+  </div>
+  <!-- Hidden compatibility elements -->
+  <div style="display:none;">
+    <img src="/api/cards/{player_id}" alt="Titans' Arcade Souvenir Card - {player_id}" />
+    <a href="/api/cards/{player_id}" download="TitansArcade_{player_id}.png" class="btn-download">Download</a>
+  </div>"""
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+{refresh_meta}
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Titans' Arcade - Souvenir Card - {player_id}</title>
 <style>
@@ -725,19 +770,7 @@ def souvenir_card_page(player_id: str) -> HTMLResponse:
     <div class="brand-title">TITANS' ARCADE</div>
     <a href="/" class="nav-btn">LEADERBOARD</a>
   </header>
-  <div class="player-tag">★ SOUVENIR CARD: {name} ({player_id}){roll_display} ★</div>
-  <div class="card-preview">
-    <img src="/api/cards/{player_id}" alt="Titans' Arcade Souvenir Card - {player_id}" />
-  </div>
-  <div class="action-box">
-    <a href="/api/cards/{player_id}" download="TitansArcade_{player_id}.png" class="btn-download">
-      ⬇ DOWNLOAD SOUVENIR CARD
-    </a>
-    <div class="card-footer-info">
-      Full 1080×1350 High Resolution PNG • 100% Offline Local Network<br>
-      Saved directly to your device • Share with friends!
-    </div>
-  </div>
+  {main_content}
 </div>
 </body>
 </html>"""
@@ -2006,15 +2039,18 @@ def operator_desk(request: Request) -> str:
           Send player to Station A or Station B with this ID!
         </div>
         <div id="reg-qr-section" style="margin-top: 12px; padding: 10px; background: #201138; border: 1px solid #5a3c8c; border-radius: 6px; text-align: center;">
-          <div style="font-family: var(--font-pixel); font-size: 10px; font-weight: 800; color: var(--sunset-gold); margin-bottom: 6px; letter-spacing: 0.5px;">
-            SCAN WITH PHONE FOR SOUVENIR CARD
+          <div style="font-family: var(--font-pixel); font-size: 10px; font-weight: 800; color: var(--sunset-gold); margin-bottom: 4px; letter-spacing: 0.5px;">
+            ★ MATCH PASS ACTIVATED ★
           </div>
-          <img id="reg-qr-img" src="" alt="QR Code" style="width: 120px; height: 120px; border-radius: 4px; border: 1px solid var(--sunset-gold); background: #fff;" />
-          <div style="margin-top: 6px;">
+          <div style="font-size: 11px; color: #fbcfe8; line-height: 1.4; margin-bottom: 6px;">
+            Player is registered! Final Souvenir Card & QR code will appear on the Station display upon game completion.
+          </div>
+          <div style="margin-top: 4px;">
             <a id="reg-card-link" href="#" target="_blank" style="font-family: var(--font-pixel); font-size: 10px; color: var(--neon-cyan); text-decoration: underline;">
-              Open Souvenir Card Page ↗
+              Preview Pending Card Page ↗
             </a>
           </div>
+          <img id="reg-qr-img" src="" alt="QR Code" style="display:none; width: 1px; height: 1px;" />
         </div>
       </div>
 

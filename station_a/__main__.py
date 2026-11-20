@@ -76,6 +76,7 @@ def main() -> None:
         print(f"[Station A] Connected to Laptop 3 Server: {net_client.server_url}")
 
     renderer = LavaArenaRenderer(mapper=mapper, arena_w_m=arena_w, arena_h_m=arena_h, fullscreen=args.fullscreen)
+    renderer.server_url = net_client.server_url
     clock = pygame.time.Clock()
 
     score_saved = False
@@ -173,10 +174,10 @@ def main() -> None:
                     )
                     enqueue_score(score_event)
                     score_saved = True
-                    result_timer_s = 8.0  # Display results for 8 seconds
+                    result_timer_s = 15.0  # Display results and souvenir QR for 15 seconds
                     last_player_name = getattr(engine, "player_name", state.player_id or "Player 1")
                     last_player_score = state.score
-                    print(f"[Station A] Tournament completed! Score: {state.score} pts. Holding 8s...")
+                    print(f"[Station A] Tournament completed! Score: {state.score} pts. Displaying Souvenir QR (15s hold)...")
                 else:
                     result_timer_s -= dt
                     if result_timer_s <= 0.0:

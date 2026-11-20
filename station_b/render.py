@@ -221,6 +221,9 @@ class BlazerArenaRenderer:
         pygame.display.set_caption("Titans' Arcade — Station B: Pose Blazer Tournament")
 
         self.is_maximized = False
+        self.server_url: str = ""
+        self._qr_cache_pid: str | None = None
+        self._qr_cache_surf: pygame.Surface | None = None
         if fullscreen:
             self._maximize_window()
 
@@ -786,6 +789,53 @@ class BlazerArenaRenderer:
                 shadow_offset=2,
             )
             self.screen.blit(stats, stats.get_rect(center=(win_w // 2, int(win_h * 0.59))))
+
+            # QR Code Souvenir Card Section
+            card_panel_w, card_panel_h = 440, 130
+            card_y = int(win_h * 0.65)
+            card_x = (win_w - card_panel_w) // 2
+
+            # Panel background
+            c_bg = pygame.Surface((card_panel_w, card_panel_h), pygame.SRCALPHA)
+            c_bg.fill((28, 14, 48, 235))
+            self.screen.blit(c_bg, (card_x, card_y))
+            pygame.draw.rect(self.screen, (234, 125, 139), (card_x, card_y, card_panel_w, card_panel_h), 2, border_radius=8)
+
+            pid = getattr(state, "player_id", "") or "P001"
+            if self.server_url and pid and pid != "P000":
+                if self._qr_cache_pid != pid:
+                    try:
+                        from cards.qr import generate_qr_image
+                        qr_target_url = f"{self.server_url.rstrip('/')}/card/{pid}"
+                        qr_img = generate_qr_image(qr_target_url, box_size=3, border=2)
+                        raw_bytes = qr_img.tobytes()
+                        self._qr_cache_surf = pygame.image.fromstring(raw_bytes, qr_img.size, "RGB")
+                        self._qr_cache_pid = pid
+                    except Exception:
+                        self._qr_cache_surf = None
+
+                if self._qr_cache_surf:
+                    qr_scaled = pygame.transform.scale(self._qr_cache_surf, (110, 110))
+                    qr_rect = qr_scaled.get_rect(midleft=(card_x + 16, card_y + card_panel_h // 2))
+                    self.screen.blit(qr_scaled, qr_rect)
+                    pygame.draw.rect(self.screen, (255, 209, 82), qr_rect, 2)
+
+                    text_x = card_x + 140
+                    t1 = render_pixel_text("SOUVENIR PHOTO CARD", scale=2, top_color=(255, 209, 82), bottom_color=(234, 125, 139), shadow_offset=2)
+                    self.screen.blit(t1, (text_x, card_y + 16))
+                    t2 = render_pixel_text("SCAN WITH PHONE TO VIEW", scale=1, top_color=(0, 240, 255), bottom_color=(0, 140, 255), shadow_offset=1)
+                    self.screen.blit(t2, (text_x, card_y + 44))
+                    t3 = render_pixel_text(f"PLAYER: {pid}  |  RANKED RECORD", scale=1, top_color=(255, 220, 50), bottom_color=(255, 120, 0), shadow_offset=1)
+                    self.screen.blit(t3, (text_x, card_y + 64))
+                    t4 = render_pixel_text("AUTO-EXIT IN 15S  |  [SPACE] SKIP", scale=1, top_color=(180, 190, 210), bottom_color=(120, 130, 150), shadow_offset=1)
+                    self.screen.blit(t4, (text_x, card_y + 88))
+            else:
+                t1 = render_pixel_text("SOUVENIR PHOTO CARD", scale=2, top_color=(255, 209, 82), bottom_color=(234, 125, 139), shadow_offset=2)
+                self.screen.blit(t1, t1.get_rect(center=(win_w // 2, card_y + 35)))
+                t2 = render_pixel_text("REGISTER AT DESK FOR YOUR SOUVENIR CARD", scale=1, top_color=(0, 240, 255), bottom_color=(0, 140, 255), shadow_offset=1)
+                self.screen.blit(t2, t2.get_rect(center=(win_w // 2, card_y + 65)))
+                t3 = render_pixel_text("AUTO-EXIT IN 15S  |  [SPACE] CONTINUE", scale=1, top_color=(180, 190, 210), bottom_color=(120, 130, 150), shadow_offset=1)
+                self.screen.blit(t3, t3.get_rect(center=(win_w // 2, card_y + 90)))
 
             # Highlighted Buttons: Bottom-Left (Retry) and Bottom-Right (Exit)
             btn_w, btn_h = 240, 50
