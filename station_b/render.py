@@ -423,7 +423,7 @@ class BlazerArenaRenderer:
 
         # 6. Gesture Pro-Tip
         tip_y = int(win_h * 0.72)
-        tip_surf = render_pixel_text("PRO-TIP: RIGHT HAND ON HEAD (0.5s) TO SKIP TO NEXT POSE", scale=2, top_color=(0, 255, 128), bottom_color=(0, 160, 70), shadow_offset=2)
+        tip_surf = render_pixel_text("PRO-TIP: RAISE HAND HIGH OR TOUCH HEAD (0.5s) TO SKIP", scale=2, top_color=(0, 255, 128), bottom_color=(0, 160, 70), shadow_offset=2)
         self.screen.blit(tip_surf, tip_surf.get_rect(center=(win_w // 2, tip_y)))
 
         # 7. Controls footer
@@ -566,7 +566,7 @@ class BlazerArenaRenderer:
             pygame.draw.rect(self.screen, (255, 80, 80), (sx, sy, skip_w, skip_h), 2)
 
             skip_txt = render_pixel_text(
-                f"HAND ON HEAD: SKIPPING... {int(pct_skip * 100)}%",
+                f"HOLD TO SKIP... {int(pct_skip * 100)}%",
                 scale=1,
                 top_color=(255, 255, 255),
                 bottom_color=(255, 200, 200),

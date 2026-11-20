@@ -38,7 +38,7 @@ ROUND_1_PERFECTION_THRESHOLD = 85.0
 ROUND_1_SKIP_HOLD_S = 0.50  # Snappy 0.5s skip hold (Hand on Head)
 
 ROUND_2_GLOBAL_DURATION_S = 30.0
-ROUND_2_HOLD_S = 0.20
+ROUND_2_HOLD_S = 0.28
 ROUND_2_SKIP_HOLD_S = 0.40  # 0.4s fast skip in Round 2
 ROUND_2_SPEED_MULT = 45.0
 
@@ -68,13 +68,12 @@ def is_hand_on_head(
     player_angles: dict[str, float | None] | None,
     player_landmarks_norm: Sequence[Sequence[float]] | None = None,
 ) -> bool:
-    """Detect skip gesture: Hand on Head (Right/Left hand on crown of head) OR Crossed Arms.
+    """Detect skip gesture: Hand Raised High, Hand on Head/Crown/Ear, or Crossed Arms.
     
     Vision conditions with MediaPipe 33 normalized landmarks:
-    - Right wrist horizontally aligned with head: abs(wrist.x - nose.x) < 0.15
-    - Right wrist vertically above nose: wrist.y < nose.y
-    - Right elbow bent to reach crown of head: right_elbow < 115.0
-    (Same check supported for Left hand as an ergonomic bonus).
+    - Hand Raised High: Either wrist clearly elevated above head/eyes
+    - Hand on Head: Either wrist within generous lateral range (28%) and near crown/temple
+    - Crossed Arms: Wrists crossed across torso
     """
     if not player_angles:
         return False
@@ -89,38 +88,43 @@ def is_hand_on_head(
         nose = player_landmarks_norm[0]
         rw = player_landmarks_norm[16]
         lw = player_landmarks_norm[15]
+        lsh = player_landmarks_norm[11]
+        rsh = player_landmarks_norm[12]
 
-        # Check A: Right hand on head
-        r_bent = (r_el is not None and r_el < 115.0) or (r_sh is not None and r_sh > 40.0)
-        r_on_head = (rw[1] < nose[1]) and (abs(rw[0] - nose[0]) < 0.15) and r_bent
+        # Check A: Hand Raised High (either wrist clearly above shoulders and head)
+        r_raised = (rw[1] < rsh[1] - 0.08) and (rw[1] < nose[1] - 0.02) and (abs(rw[0] - rsh[0]) < 0.35)
+        l_raised = (lw[1] < lsh[1] - 0.08) and (lw[1] < nose[1] - 0.02) and (abs(lw[0] - lsh[0]) < 0.35)
+        if r_raised or l_raised:
+            return True
+
+        # Check B: Hand on Head / Temple / Ear (wrist above shoulder, close to head)
+        r_bent = (r_el is not None and r_el < 135.0) or (r_sh is not None and r_sh > 30.0)
+        r_on_head = (rw[1] < rsh[1]) and (rw[1] < nose[1] + 0.05) and (abs(rw[0] - nose[0]) < 0.25) and r_bent
         if r_on_head:
             return True
 
-        # Check B: Left hand on head
-        l_bent = (l_el is not None and l_el < 115.0) or (l_sh is not None and l_sh > 40.0)
-        l_on_head = (lw[1] < nose[1]) and (abs(lw[0] - nose[0]) < 0.15) and l_bent
+        l_bent = (l_el is not None and l_el < 135.0) or (l_sh is not None and l_sh > 30.0)
+        l_on_head = (lw[1] < lsh[1]) and (lw[1] < nose[1] + 0.05) and (abs(lw[0] - nose[0]) < 0.25) and l_bent
         if l_on_head:
             return True
 
         # Check C: Crossed Arms with landmarks
-        lsh = player_landmarks_norm[11]
-        rsh = player_landmarks_norm[12]
         crossed = (lw[0] < rw[0]) if lsh[0] > rsh[0] else (rw[0] < lw[0])
         mid_sh_y = (lsh[1] + rsh[1]) / 2.0
-        chest_level = (lw[1] > mid_sh_y - 0.05) and (rw[1] > mid_sh_y - 0.05)
-        elbows_bent = (l_el is not None and 50.0 <= l_el <= 105.0) and (r_el is not None and 50.0 <= r_el <= 105.0)
+        chest_level = (lw[1] > mid_sh_y - 0.08) and (rw[1] > mid_sh_y - 0.08)
+        elbows_bent = (l_el is not None and 40.0 <= l_el <= 120.0) and (r_el is not None and 40.0 <= r_el <= 120.0)
         if crossed and chest_level and elbows_bent:
             return True
 
-        # Landmarks present, neither hand on head nor crossed arms
+        # Landmarks present, neither hand raised, hand on head, nor crossed arms
         return False
 
     # 2. Angle-only fallback (when landmarks are None / not provided)
     if r_el is not None and r_sh is not None:
-        if r_el < 105.0 and r_sh > 65.0:
+        if r_el < 115.0 and r_sh > 50.0:
             return True
     if l_el is not None and r_el is not None and l_sh is not None and r_sh is not None:
-        if (50.0 <= l_el <= 105.0 and 50.0 <= r_el <= 105.0) and (l_sh < 50.0 and r_sh < 50.0):
+        if (40.0 <= l_el <= 120.0 and 40.0 <= r_el <= 120.0) and (l_sh < 55.0 and r_sh < 55.0):
             return True
 
     return False
@@ -444,7 +448,7 @@ class BlazerGameEngine:
                     self.is_pose_locked = True
                     self._record_success(self.pose_elapsed_s, match_res.match_pct)
             else:
-                self.hold_timer_s = max(0.0, self.hold_timer_s - dt * 2.5)
+                self.hold_timer_s = max(0.0, self.hold_timer_s - dt * 1.0)
 
             # Round 1 Pose Timeout
             if self.timer_enabled and self.time_left_s <= 0.0 and not self.is_pose_locked:
@@ -468,7 +472,7 @@ class BlazerGameEngine:
                     self.is_pose_locked = True
                     self._record_success(self.pose_elapsed_s, match_res.match_pct)
             else:
-                self.hold_timer_s = max(0.0, self.hold_timer_s - dt * 2.5)
+                self.hold_timer_s = max(0.0, self.hold_timer_s - dt * 1.0)
 
             # Round 2 Global Time Expiration
             if self.timer_enabled and self.round_2_timer_s <= 0.0:

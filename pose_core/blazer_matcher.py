@@ -257,6 +257,11 @@ def evaluate_blazer_pose(
         for j in target.key_joints
         if j in joint_status
     )
+    # Forgiving Key-Limb rule: If player achieves high overall match (>= 75.0%),
+    # allow pass even if a single key joint is borderline off
+    if match_pct >= 75.0 and num_reds <= 1:
+        has_red_key = False
+
     is_matched = (
         (match_pct >= pass_threshold_pct)
         and (num_reds <= 1)
