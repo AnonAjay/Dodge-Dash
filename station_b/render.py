@@ -326,7 +326,10 @@ class BlazerArenaRenderer:
             cropped = resized[y0:y0 + win_h, x0:x0 + win_w]
 
             rgb = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
-            cam_surf = pygame.image.frombuffer(rgb.tobytes(), (win_w, win_h), "RGB")
+            h_c, w_c = rgb.shape[:2]
+            cam_surf = pygame.image.frombuffer(rgb.tobytes(), (w_c, h_c), "RGB")
+            if (w_c, h_c) != (win_w, win_h):
+                cam_surf = pygame.transform.scale(cam_surf, (win_w, win_h))
             self.screen.blit(cam_surf, (0, 0))
 
             # Draw mirrored neon skeleton so player sees they are detected

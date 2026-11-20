@@ -886,8 +886,10 @@ class LavaArenaRenderer:
         if cam_frame is not None:
             ar_bg = self._render_ar_frame(cam_frame, None, pose, now, 0.016, debug=debug)
             rgb = cv2.cvtColor(ar_bg, cv2.COLOR_BGR2RGB)
-            cam_surf = pygame.image.frombuffer(rgb.tobytes(), (win_w, win_h), "RGB")
-            self.screen.blit(cam_surf, (0, 0))
+            h, w = rgb.shape[:2]
+            cam_surf = pygame.image.frombuffer(rgb.tobytes(), (w, h), "RGB")
+            scaled_cam = pygame.transform.scale(cam_surf, (win_w, win_h))
+            self.screen.blit(scaled_cam, (0, 0))
 
         # 2. Cyber Tint Veil (55% dark) so text has crisp arcade contrast
         tint = pygame.Surface((win_w, win_h), pygame.SRCALPHA)
