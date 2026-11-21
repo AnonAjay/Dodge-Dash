@@ -24,9 +24,71 @@ from pose_core.skeleton import Skeleton3D, SkeletonBuilder
 from shared.contracts import PoseFrame
 
 # ---- tunables ----------------------------------------------------------------
-SMOOTH_ALPHA = 0.5     # 1.0 = no smoothing, lower = smoother but laggier
+SMOOTH_ALPHA = 0.5     # legacy fallback
 TELEPORT_PX = 150      # a bigger jump than this = a different person, don't smooth across it
 LOST_GRACE_S = 0.5     # keep the last position this long when detection blinks out
+ONE_EURO_MIN_CUTOFF = 0.8  # Hz: heavier smoothing at rest to kill sensor noise
+ONE_EURO_BETA = 0.02       # Speed coefficient: eliminates lag during fast movement
+ONE_EURO_D_CUTOFF = 1.0    # Hz: cutoff for derivative/speed estimation
+
+
+class OneEuroFilter:
+    """1-Euro adaptive low-pass filter for 2D points (Casiez et al., CHI 2012).
+    Dynamically balances jitter elimination at rest and zero lag at speed.
+    """
+
+    def __init__(self, min_cutoff: float = ONE_EURO_MIN_CUTOFF, beta: float = ONE_EURO_BETA, d_cutoff: float = ONE_EURO_D_CUTOFF):
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        self.d_cutoff = d_cutoff
+        self.x_prev: np.ndarray | None = None
+        self.dx_prev: np.ndarray | None = None
+        self.t_prev: float | None = None
+
+    def _alpha(self, cutoff: float, dt: float) -> float:
+        tau = 1.0 / (2.0 * math.pi * max(cutoff, 1e-4))
+        return 1.0 / (1.0 + tau / max(dt, 1e-4))
+
+    def filter(self, x: np.ndarray | tuple[float, float], t: float) -> np.ndarray:
+        x = np.asarray(x, dtype=float)
+        if self.x_prev is None or self.t_prev is None:
+            self.x_prev = x
+            self.dx_prev = np.zeros_like(x)
+            self.t_prev = t
+            return x
+
+        dt = t - self.t_prev
+        if dt <= 1e-4:
+            return self.x_prev
+
+        # Teleport guard: if tracked point snaps across room, reset immediately
+        if np.linalg.norm(x - self.x_prev) > TELEPORT_PX:
+            self.x_prev = x
+            self.dx_prev = np.zeros_like(x)
+            self.t_prev = t
+            return x
+
+        # 1. Estimate filtered derivative (velocity in px/s)
+        dx = (x - self.x_prev) / dt
+        a_d = self._alpha(self.d_cutoff, dt)
+        dx_hat = a_d * dx + (1.0 - a_d) * self.dx_prev
+        self.dx_prev = dx_hat
+
+        # 2. Dynamic cutoff based on speed
+        speed = float(np.linalg.norm(dx_hat))
+        cutoff = self.min_cutoff + self.beta * speed
+
+        # 3. Filter position
+        a = self._alpha(cutoff, dt)
+        x_hat = a * x + (1.0 - a) * self.x_prev
+        self.x_prev = x_hat
+        self.t_prev = t
+        return x_hat
+
+    def reset(self):
+        self.x_prev = None
+        self.dx_prev = None
+        self.t_prev = None
 
 
 def open_camera(index: int = 0, width: int = 640, height: int = 480):
@@ -68,7 +130,7 @@ class PoseTracker:
     def __init__(self, mapper: FloorMapper):
         self.mapper = mapper
         self.jump = JumpDetector()
-        self.sm: dict[str, np.ndarray] = {}
+        self.sm: dict[str, OneEuroFilter] = {}
         self.last_floor = (mapper.w_m / 2, mapper.h_m / 2)
         self.grounded = None            # last (centre, left, right) floor positions on the ground
         self.last_pf: PoseFrame | None = None
@@ -77,14 +139,11 @@ class PoseTracker:
         self.skeleton: Skeleton3D | None = None
         self.skeleton_builder = SkeletonBuilder()
 
-    def _smooth(self, key: str, px):
-        px = np.asarray(px, dtype=float)
-        prev = self.sm.get(key)
-        if prev is None or np.linalg.norm(px - prev) > TELEPORT_PX:
-            self.sm[key] = px
-        else:
-            self.sm[key] = SMOOTH_ALPHA * px + (1 - SMOOTH_ALPHA) * prev
-        return self.sm[key]
+    def _smooth(self, key: str, px, ts: float | None = None) -> np.ndarray:
+        if key not in self.sm:
+            self.sm[key] = OneEuroFilter()
+        current_ts = ts if ts is not None else (self.last_good_ts or 0.0)
+        return self.sm[key].filter(px, current_ts)
 
     def update(self, people, img_w: int, img_h: int, ts: float,
                world_people: list | None = None) -> PoseFrame:
@@ -125,15 +184,15 @@ class PoseTracker:
             pos, lf, rf = self.grounded
             centre = np.asarray(c["centre_px"], dtype=float)   # raw, for the debug view only
         else:
-            centre = self._smooth("c", c["centre_px"])
+            centre = self._smooth("c", c["centre_px"], ts)
             for key, name in (("l", "left_px"), ("r", "right_px")):
                 if c[name] is not None:
-                    self._smooth(key, c[name])
+                    self._smooth(key, c[name], ts)
                 else:
                     self.sm.pop(key, None)
             pos = self.mapper.to_floor(*centre)
-            lf = self.mapper.to_floor(*self.sm["l"]) if "l" in self.sm else None
-            rf = self.mapper.to_floor(*self.sm["r"]) if "r" in self.sm else None
+            lf = self.mapper.to_floor(*self.sm["l"].x_prev) if ("l" in self.sm and self.sm["l"].x_prev is not None) else None
+            rf = self.mapper.to_floor(*self.sm["r"].x_prev) if ("r" in self.sm and self.sm["r"].x_prev is not None) else None
             self.grounded = (pos, lf, rf)
         self.last_floor = pos
 
