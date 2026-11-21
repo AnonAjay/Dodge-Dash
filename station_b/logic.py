@@ -110,19 +110,23 @@ def is_hand_on_nose(
                 if math.hypot(pt[0] - lw[0], pt[1] - lw[1]) < 0.25:
                     l_hand_pts.append(pt)
 
-        # Check A: Right Hand to Nose (wrist near face level, elbow bent, close to nose)
+        # Check A: Right Hand to Nose (strictly centered on nose, elbow bent)
         r_elbow_bent = (r_el is not None and r_el < 140.0) or (r_sh is not None and r_sh > 25.0)
-        r_near_face = rw[1] < mid_sh_y + 0.15
-        min_r_dist = min(math.hypot(pt[0] - nose[0], pt[1] - nose[1]) for pt in r_hand_pts)
-        if min_r_dist < 0.13 and r_elbow_bent and r_near_face:
-            return True
+        if r_elbow_bent:
+            for pt in r_hand_pts:
+                dist = math.hypot(pt[0] - nose[0], pt[1] - nose[1])
+                dy = abs(pt[1] - nose[1])
+                if dist < 0.075 and dy < 0.045:
+                    return True
 
-        # Check B: Left Hand to Nose (wrist near face level, elbow bent, close to nose)
+        # Check B: Left Hand to Nose (strictly centered on nose, elbow bent)
         l_elbow_bent = (l_el is not None and l_el < 140.0) or (l_sh is not None and l_sh > 25.0)
-        l_near_face = lw[1] < mid_sh_y + 0.15
-        min_l_dist = min(math.hypot(pt[0] - nose[0], pt[1] - nose[1]) for pt in l_hand_pts)
-        if min_l_dist < 0.13 and l_elbow_bent and l_near_face:
-            return True
+        if l_elbow_bent:
+            for pt in l_hand_pts:
+                dist = math.hypot(pt[0] - nose[0], pt[1] - nose[1])
+                dy = abs(pt[1] - nose[1])
+                if dist < 0.075 and dy < 0.045:
+                    return True
 
         # Check C: Crossed Arms with landmarks
         crossed = (lw[0] < rw[0]) if lsh[0] > rsh[0] else (rw[0] < lw[0])
@@ -230,6 +234,7 @@ class BlazerGameEngine:
         self.pose_elapsed_s: float = 0.0
         self.hold_timer_s: float = 0.0
         self.skip_hold_s: float = 0.0
+        self.skip_latched: bool = False
         self.cooldown_timer_s: float = 0.0
 
         # Stats
@@ -277,6 +282,7 @@ class BlazerGameEngine:
         self.is_pose_locked = False
         self.hold_timer_s = 0.0
         self.skip_hold_s = 0.0
+        self.skip_latched = False
         self.banner_msg = "PRESS SPACE OR STEP IN TO START"
         self.banner_color = (0, 220, 255)
 
@@ -309,6 +315,7 @@ class BlazerGameEngine:
         self.r1_cleared = 0
         self.r2_cleared = 0
         self.is_pose_locked = False
+        self.skip_latched = False
         self.cooldown_timer_s = 0.0
 
         self.banner_msg = "STEP INTO FRAME TO BEGIN"
@@ -409,6 +416,11 @@ class BlazerGameEngine:
             self._finish_game()
             return self.state, None
 
+        # Check skip gesture status and maintain Edge-Triggered Latch
+        is_skipping = is_arms_crossed(player_angles, player_landmarks_norm)
+        if not is_skipping:
+            self.skip_latched = False
+
         # Cooldown pause between poses
         if self.cooldown_timer_s > 0.0:
             self.cooldown_timer_s -= dt
@@ -416,9 +428,9 @@ class BlazerGameEngine:
                 self._advance_to_next_pose()
             return self.state, self.current_pose
 
-        # Folded Arms Skip Gesture
+        # Skip Gesture Handling with Edge-Triggered Latch
         skip_req = ROUND_2_SKIP_HOLD_S if self.current_round == 2 else ROUND_1_SKIP_HOLD_S
-        if is_arms_crossed(player_angles, player_landmarks_norm):
+        if is_skipping and not self.skip_latched:
             self.skip_hold_s += dt
             pct_held = int(min(100.0, (self.skip_hold_s / skip_req) * 100.0))
             if self.skip_hold_s < skip_req:
@@ -426,6 +438,7 @@ class BlazerGameEngine:
                 self.banner_color = (255, 160, 0)
             else:
                 self.skip_hold_s = 0.0
+                self.skip_latched = True  # Latch until hand is completely released!
                 self._record_skip()
                 return self.state, self.current_pose
         else:

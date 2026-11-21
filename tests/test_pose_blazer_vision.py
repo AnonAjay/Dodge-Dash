@@ -524,6 +524,64 @@ def test_is_arms_crossed_detection():
     }
     assert is_arms_crossed(overhead_angles, lms_overhead) is False
 
+    # 6. Salute / hand at eyebrow should NOT trigger skip (tight threshold)
+    lms_salute = [[0.5, 0.5]] * 33
+    lms_salute[0] = [0.50, 0.20]   # NOSE
+    lms_salute[11] = [0.65, 0.25]  # L_SHOULDER
+    lms_salute[12] = [0.35, 0.25]  # R_SHOULDER
+    lms_salute[16] = [0.42, 0.13]  # R_WRIST at temple/eyebrow (dy = 0.07 > 0.045)
+    lms_salute[20] = [0.44, 0.12]  # R_INDEX at temple/eyebrow
+    salute_angles = {"right_elbow": 60.0, "right_shoulder": 80.0}
+    assert is_arms_crossed(salute_angles, lms_salute) is False
+
+
+def test_blazer_skip_latch_prevents_double_skip():
+    """Verify that keeping hand on nose cannot skip 2 poses in a row without releasing."""
+    from shared.contracts import Phase, PoseFrame
+    from station_b.blazer_logic import BlazerGameEngine
+
+    catalog = load_blazer_catalog("data/poses_index.json")
+    engine = BlazerGameEngine(catalog=catalog, total_rounds=6, tournament_mode=True)
+    engine.start_game("P001")
+    engine.tournament_phase = "active"
+
+    pose_frame = PoseFrame(tracked=True)
+    folded_angles = {
+        "left_shoulder": 20.0,
+        "right_shoulder": 20.0,
+        "left_elbow": 75.0,
+        "right_elbow": 75.0,
+    }
+
+    # 1. Skip Pose 1 by holding for 0.6s
+    for _ in range(6):
+        engine.update(pose_frame, dt=0.1, player_angles=folded_angles)
+    assert engine.consecutive_skips == 1
+    assert engine.skip_latched is True
+
+    # 2. Advance through cooldown (0.7s) with hand STILL held in skip position
+    for _ in range(7):
+        engine.update(pose_frame, dt=0.1, player_angles=folded_angles)
+    assert engine.round_number == 2
+    assert engine.skip_latched is True
+
+    # 3. Even after 2.0s of continuous hand-on-nose, Pose 2 must NOT skip!
+    for _ in range(20):
+        engine.update(pose_frame, dt=0.1, player_angles=folded_angles)
+    assert engine.round_number == 2
+    assert engine.consecutive_skips == 1  # Still 1, NOT 2!
+
+    # 4. Release hand (standing neutral) -> resets latch
+    standing_angles = {"left_shoulder": 20.0, "right_shoulder": 20.0, "left_elbow": 170.0, "right_elbow": 170.0}
+    engine.update(pose_frame, dt=0.1, player_angles=standing_angles)
+    assert engine.skip_latched is False
+
+    # 5. Now touching nose again can skip Pose 2
+    for _ in range(6):
+        engine.update(pose_frame, dt=0.1, player_angles=folded_angles)
+    assert engine.round_number == 2
+    assert engine.consecutive_skips == 2
+
 
 def test_blazer_skip_and_consecutive_elimination():
     from shared.contracts import Phase, PoseFrame
@@ -668,13 +726,17 @@ def test_normal_standing_never_passes_and_red_key_fails():
 def test_hand_on_head_gesture_detection():
     from station_b.logic import is_hand_on_head
 
-    # Create dummy 33 landmarks where nose is at (0.50, 0.25) and right wrist is on head crown at (0.50, 0.15)
+    # Create dummy 33 landmarks where nose is at (0.50, 0.25) and right wrist is directly on nose at (0.51, 0.25)
     lms = [[0.5, 0.5, 1.0] for _ in range(33)]
     lms[0] = [0.50, 0.25, 1.0]   # NOSE
-    lms[16] = [0.50, 0.15, 1.0]  # R_WRIST directly on head crown
+    lms[16] = [0.51, 0.25, 1.0]  # R_WRIST directly on nose
     angles = {"right_elbow": 75.0, "right_shoulder": 60.0}
 
     assert is_hand_on_head(angles, lms) is True
+
+    # When right hand is on head crown above nose (y=0.10) - should NOT skip:
+    lms[16] = [0.50, 0.10, 1.0]
+    assert is_hand_on_head(angles, lms) is False
 
     # When right hand is down by hip (y=0.60):
     lms[16] = [0.50, 0.60, 1.0]
