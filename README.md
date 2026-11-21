@@ -33,6 +33,7 @@
 - **Computer Vision:** 
   - Monocular camera feed calibrated via a **Planar Homography Matrix ($H \in \mathbb{R}^{3 \times 3}$)** mapping image pixels $(u, v)$ directly to real-world Euclidean floor coordinates $(X_w, Y_w)$.
   - Only the player's feet touch the floor plane ($Z=0$), preventing parallax distortion from head/arm movements.
+  - **1-Euro Adaptive Low-Pass Filter ($f_c = f_{\text{min}} + \beta |\hat{v}|$):** Dynamically scales cutoff frequency from $0.8\text{ Hz}$ at rest (eliminating sensor noise jitter) to $20+\text{ Hz}$ during movement, delivering sub-millimeter stability with $<15\text{ ms}$ latency and 60 FPS fluidity.
 - **Game Engine:** 3-round tournament lifecycle (Rivers, Islands/Donuts, Bridges) with 30s active rounds, 7.5s resting intervals, dynamic heatmap propagation, and combo streak multipliers.
 
 ### ⚡ Station B: Pose Blazer (Speed Pose Match)
@@ -40,7 +41,7 @@
 - **Computer Vision & Kinematics:**
   - Evaluates **scale-, height-, and distance-invariant interior joint angles** across 6 major limbs (shoulders, elbows, knees) using normalized vector dot products.
   - Zero-cost Edge Optical Motion Capture pipeline serving as human demonstration trajectories for Inverse Kinematics (IK) retargeting.
-- **Game Engine:** 2-stage tournament (Stage 1: Precision Gauntlet, Stage 2: Speed Rush) featuring Dynamic Difficulty Adjustment (DDA) and an intuitive body-gesture skip mechanism.
+- **Game Engine:** 2-stage tournament (Stage 1: Precision Gauntlet, Stage 2: Speed Rush) featuring Dynamic Difficulty Adjustment (DDA), a clean 3-zone retro arcade attract screen, and a **Touch-Nose Skip Gesture** with edge-triggered latching (release-to-rearm) to eliminate false skips on overhead poses.
 
 ### 🖥️ Laptop 3: Event Core & Souvenir Studio
 - **Central FastAPI Server:** Sub-millisecond REST & SSE backend coordinating station heartbeats, player queues, and high-scores.
@@ -136,7 +137,8 @@ python -m station_b --keyboard
 
 ## 🛠️ Developer Tools
 
-- **Pose Catalog Studio:** `python -m tools.index_poses --list`
+- **Pose Studio & Angle Tuner:** `python -m tools.pose_studio` (interactive visual pose editor, target angle tuning, live webcam calibration)
+- **Pose Catalog Indexer:** `python -m tools.index_poses --list`
 - **Floor Homography Calibrator:** `python -m tools.calibrate_floor`
 - **Camera & Inference Benchmark:** `python -m tools.timing_test`
 - **Unit & Integration Tests:** `pytest`
