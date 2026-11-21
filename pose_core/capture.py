@@ -27,6 +27,8 @@ from shared.contracts import PoseFrame
 SMOOTH_ALPHA = 0.5     # 1.0 = no smoothing, lower = smoother but laggier
 TELEPORT_PX = 150      # a bigger jump than this = a different person, don't smooth across it
 LOST_GRACE_S = 0.5     # keep the last position this long when detection blinks out
+ANCHOR_RADIUS_M = 0.08 # clamp floor position to anchor if within 8cm (kills sensor noise)
+ANCHOR_MAX_SPEED = 0.15 # player is stationary if moving < 0.15 m/s
 
 
 def open_camera(index: int = 0, width: int = 640, height: int = 480):
@@ -71,6 +73,9 @@ class PoseTracker:
         self.sm: dict[str, np.ndarray] = {}
         self.last_floor = (mapper.w_m / 2, mapper.h_m / 2)
         self.grounded = None            # last (centre, left, right) floor positions on the ground
+        self.anchor_floor: tuple[float, float] | None = None
+        self.last_floor_ts: float | None = None
+        self.last_raw_floor: tuple[float, float] | None = None
         self.last_pf: PoseFrame | None = None
         self.last_good_ts: float | None = None
         self.debug: dict = {}
@@ -105,6 +110,9 @@ class PoseTracker:
         if not cands:
             self.sm.clear()
             self.jump.reset()
+            self.anchor_floor = None
+            self.last_floor_ts = None
+            self.last_raw_floor = None
             if self.last_pf is not None and self.last_good_ts is not None \
                     and ts - self.last_good_ts < LOST_GRACE_S:
                 if self.skeleton is not None:
@@ -124,6 +132,7 @@ class PoseTracker:
         if (airborne or self.jump.rising) and self.grounded is not None:
             pos, lf, rf = self.grounded
             centre = np.asarray(c["centre_px"], dtype=float)   # raw, for the debug view only
+            self.anchor_floor = None
         else:
             centre = self._smooth("c", c["centre_px"])
             for key, name in (("l", "left_px"), ("r", "right_px")):
@@ -131,9 +140,39 @@ class PoseTracker:
                     self._smooth(key, c[name])
                 else:
                     self.sm.pop(key, None)
-            pos = self.mapper.to_floor(*centre)
-            lf = self.mapper.to_floor(*self.sm["l"]) if "l" in self.sm else None
-            rf = self.mapper.to_floor(*self.sm["r"]) if "r" in self.sm else None
+            raw_pos = self.mapper.to_floor(*centre)
+            raw_lf = self.mapper.to_floor(*self.sm["l"]) if "l" in self.sm else None
+            raw_rf = self.mapper.to_floor(*self.sm["r"]) if "r" in self.sm else None
+
+            # Velocity-gated anchor lock: eliminate sensor noise jitter while standing still
+            dt = (ts - self.last_floor_ts) if self.last_floor_ts is not None else 0.033
+            dt = max(0.001, min(dt, 0.2))
+
+            if self.anchor_floor is None:
+                self.anchor_floor = raw_pos
+                pos = raw_pos
+                lf, rf = raw_lf, raw_rf
+            else:
+                dist_from_anchor = math.hypot(raw_pos[0] - self.anchor_floor[0], raw_pos[1] - self.anchor_floor[1])
+                speed = 0.0
+                if self.last_raw_floor is not None:
+                    step_dist = math.hypot(raw_pos[0] - self.last_raw_floor[0], raw_pos[1] - self.last_raw_floor[1])
+                    speed = step_dist / dt
+
+                # Anchor lock: clamp to anchor if displacement is within sensor noise radius (< 8 cm)
+                if dist_from_anchor < ANCHOR_RADIUS_M:
+                    pos = self.anchor_floor
+                    if self.grounded is not None and self.grounded[0] == self.anchor_floor:
+                        lf, rf = self.grounded[1], self.grounded[2]
+                    else:
+                        lf, rf = raw_lf, raw_rf
+                else:
+                    self.anchor_floor = raw_pos
+                    pos = raw_pos
+                    lf, rf = raw_lf, raw_rf
+
+            self.last_raw_floor = raw_pos
+            self.last_floor_ts = ts
             self.grounded = (pos, lf, rf)
         self.last_floor = pos
 

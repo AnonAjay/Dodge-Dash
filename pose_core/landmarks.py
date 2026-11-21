@@ -42,10 +42,12 @@ def _mean_xy(pts):
 
 
 def foot_points(lms, w, h):
-    """Pixel points of the feet: heels + toes of both feet (ankles if those are missing)."""
+    """Pixel points of the feet: Ankles are primary (most reliable on budget webcams).
+    Falls back to heels + toes if ankles are missing."""
+    ankles = _vis_pts(lms, (L_ANKLE, R_ANKLE), w, h)
+    if ankles:
+        return [(x, y) for x, y, _ in ankles]
     pts = _vis_pts(lms, (L_HEEL, R_HEEL, L_TOE, R_TOE), w, h)
-    if len(pts) < 2:
-        pts = _vis_pts(lms, (L_ANKLE, R_ANKLE), w, h)
     return [(x, y) for x, y, _ in pts]
 
 
@@ -70,21 +72,35 @@ def arms_up(lms) -> bool:
 
 
 def feet_info(lms, w, h):
-    """Everything the tracker needs about one person, or None if no feet are visible."""
-    pts = _vis_pts(lms, (L_HEEL, R_HEEL, L_TOE, R_TOE), w, h)
-    if len(pts) < 2:  # fall back to ankles
-        pts = _vis_pts(lms, (L_ANKLE, R_ANKLE), w, h)
+    """Everything the tracker needs about one person, or None if no feet/ankles are visible."""
+    # Prioritize ankles as primary ground truth (robust against shadows/glare on budget webcams)
+    ankles = _vis_pts(lms, (L_ANKLE, R_ANKLE), w, h)
+    if ankles:
+        pts = ankles
+    else:
+        pts = _vis_pts(lms, (L_HEEL, R_HEEL, L_TOE, R_TOE), w, h)
     if not pts:
         return None
-    left = _vis_pts(lms, (L_ANKLE, L_HEEL, L_TOE), w, h)
-    right = _vis_pts(lms, (R_ANKLE, R_HEEL, R_TOE), w, h)
+
+    # Individual feet: prefer ankle if visible, otherwise any visible foot point
+    l_ankle = _vis_pts(lms, (L_ANKLE,), w, h)
+    r_ankle = _vis_pts(lms, (R_ANKLE,), w, h)
+    left_all = _vis_pts(lms, (L_ANKLE, L_HEEL, L_TOE), w, h)
+    right_all = _vis_pts(lms, (R_ANKLE, R_HEEL, R_TOE), w, h)
+
+    left_pt = l_ankle[0][:2] if l_ankle else (_mean_xy(left_all) if left_all else None)
+    right_pt = r_ankle[0][:2] if r_ankle else (_mean_xy(right_all) if right_all else None)
+
+    yl = l_ankle[0][1] if l_ankle else (float(np.mean([p[1] for p in left_all])) if left_all else None)
+    yr = r_ankle[0][1] if r_ankle else (float(np.mean([p[1] for p in right_all])) if right_all else None)
+
     return {
         "centre_px": _mean_xy(pts),
-        "left_px": _mean_xy(left) if left else None,
-        "right_px": _mean_xy(right) if right else None,
+        "left_px": left_pt,
+        "right_px": right_pt,
         "conf": float(np.mean([p[2] for p in pts])),
-        "yl": float(np.mean([p[1] for p in left])) if left else None,
-        "yr": float(np.mean([p[1] for p in right])) if right else None,
+        "yl": yl,
+        "yr": yr,
         "torso": torso_length_px(lms, w, h),
         "y_hip": (lms[L_HIP].y + lms[R_HIP].y) / 2 * h if min(lms[L_HIP].visibility, lms[R_HIP].visibility) >= MIN_VIS else None,
         "pts": [(p[0], p[1]) for p in pts],
